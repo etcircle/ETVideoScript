@@ -1,0 +1,10 @@
+{
+  "commit": "50767fa",
+  "buildType": "prod",
+  "runs": 3,
+  "p95LongFrameMs": 138.87,
+  "maxLongFrameMs": 144.4,
+  "wallTimeMs": 1440,
+  "editsCommitted": 10,
+  "notes": "CDP fallback used because Playwright is not installed in the repo; manifest restored after each run for repeatability."
+}

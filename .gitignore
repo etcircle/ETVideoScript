@@ -1,0 +1,25 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+**/dist/
+**/.next/
+*.tsbuildinfo
+**/*.tsbuildinfo
+build/
+.cache/
+temp/
+workspaces/*
+!workspaces/.gitkeep
+.gstack/
+.tls/
+
+# Local AI-agent state + project memory (never publish)
+memory/
+.claude/skills/
+.claude/.curate/
+.claude/hooks/
+.claude/scheduled_tasks.lock
+.cgcignore

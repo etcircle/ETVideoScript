@@ -1,0 +1,32 @@
+{
+  "name": "etvideo-editor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:web": "pnpm --filter @etvideoscript/studio-web dev",
+    "dev:api": "pnpm --filter @etvideoscript/local-api dev",
+    "dev:lan-tls": "caddy run --config Caddyfile",
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "perf:rapid-edit": "node scripts/perf/wave0-rapid-edit.cdp.js",
+    "doctor": "pnpm --filter @etvideoscript/cli ets doctor",
+    "smoke:multivideo-v2": "node scripts/smoke-multivideo-v2.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.8.3",
+    "tsx": "^4.19.4",
+    "vitest": "^3.1.3",
+    "ws": "^8.20.1"
+  },
+  "dependencies": {
+    "@etvideoscript/agent-protocol": "workspace:*",
+    "zod": "^3.24.4"
+  }
+}

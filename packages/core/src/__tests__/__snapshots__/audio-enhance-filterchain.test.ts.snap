@@ -1,0 +1,57 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`audio enhance local filter chain > builds deterministic ffmpeg argv for clean_voice 1`] = `
+[
+  "ffmpeg",
+  "-y",
+  "-i",
+  "/tmp/input.wav",
+  "-af",
+  "afftdn=nr=12:nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11,deesser,highpass=f=80",
+  "-acodec",
+  "pcm_s16le",
+  "/tmp/output.wav",
+]
+`;
+
+exports[`audio enhance local filter chain > builds deterministic ffmpeg argv for meeting 1`] = `
+[
+  "ffmpeg",
+  "-y",
+  "-i",
+  "/tmp/input.wav",
+  "-af",
+  "afftdn=nr=12:nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=80",
+  "-acodec",
+  "pcm_s16le",
+  "/tmp/output.wav",
+]
+`;
+
+exports[`audio enhance local filter chain > builds deterministic ffmpeg argv for podcast 1`] = `
+[
+  "ffmpeg",
+  "-y",
+  "-i",
+  "/tmp/input.wav",
+  "-af",
+  "afftdn=nr=12:nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11,deesser,highpass=f=80",
+  "-acodec",
+  "pcm_s16le",
+  "/tmp/output.wav",
+]
+`;
+
+exports[`audio enhance local filter chain > builds deterministic ffmpeg argv for tutorial 1`] = `
+[
+  "ffmpeg",
+  "-y",
+  "-i",
+  "/tmp/input.wav",
+  "-af",
+  "afftdn=nr=12:nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11",
+  "-acodec",
+  "pcm_s16le",
+  "/tmp/output.wav",
+]
+`;

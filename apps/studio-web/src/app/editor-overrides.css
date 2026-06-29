@@ -1,0 +1,381 @@
+/* editor-overrides.css — implementation adaptations layered on top of the
+ * adopted design stylesheets (editor.css + realign.css).
+ *
+ * The Claude Design prototype rendered some elements as non-interactive
+ * <span>s; our real editor renders them as <button>s for keyboard/a11y and
+ * real click wiring. Native button chrome (border, background, font) would
+ * otherwise show as boxes the design never had. These rules neutralise that
+ * so the interactive elements read exactly like the design's prose, plus a
+ * few styles for real features the prototype did not model (timeline word
+ * labels). Keep the three design files (tokens/editor/realign) pristine;
+ * put every studio-web-specific delta here.
+ *
+ * Import order: tokens.css -> editor.css -> realign.css -> editor-overrides.css -> app-chrome.css
+ */
+
+/* Transcript words are <button>s in our build (design used <span>). Strip the
+ * native button chrome so Draft/Original render as clean prose and only the
+ * design's own .tx-word states (hover/current/selected/cut/muted/lowconf/
+ * fx-speed/is-prop) provide visual treatment. */
+.tx-word {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  vertical-align: baseline;
+}
+
+/* The cut seam, voice-patch run, and op-mark rail buttons are also <button>s. */
+.tx-elide,
+.tx-vp,
+.tx-gmark { appearance: none; -webkit-appearance: none; }
+.tx-elide,
+.tx-vp { font: inherit; }
+
+/* Timeline per-word labels (a real feature beyond the design prototype's fake
+ * filmstrip): keep them quiet and on-brand so they read as scrub targets, not
+ * native buttons, when zoomed in over the waveform. */
+.tl-word-label {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.02em;
+  padding: 0 2px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.tl-word-label:hover { color: var(--ink); }
+.tl-word-label.current { color: var(--accent-text); }
+
+/* ── v4 React-only class fixes ──────────────────────────────────────
+ * The v4 React build renders several affordances the prototype never had
+ * (inline draft re-records, revert ×, Generate chip, double-click word
+ * correction, keyboard caret, ripple badge, file drop, suggestion tiles,
+ * panel banners, the timeline filmstrip wrapper). None of these classes
+ * exist in the pristine design CSS, so without rules here they fall back
+ * to raw native chrome (button boxes, blue carets, default inputs). Each
+ * rule below re-skins them onto the existing tokens — no new colours.
+ * Same idiom as the .tx-word reset above. */
+
+/* Draft re-record: in Draft/Edits prose a voice_patch/amend/proposed
+ * replacement is a <button>; strip its chrome so it reads as plain serif
+ * prose exactly like the surrounding script (the design used a <span>). */
+.tx-preview-replacement {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  vertical-align: baseline;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* Revert × on edit pills / voice-patch runs: ghost glyph button. */
+.tx-pill-revert {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 0 3px;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.tx-pill-revert:hover { color: var(--danger); }
+
+/* "Generate" chip on a draft (mute-with-text) pill: tiny inline action. */
+.tx-draft-generate {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  color: var(--accent-text);
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.tx-draft-generate:hover { border-color: var(--ink); color: var(--ink); }
+
+/* Draft pill that pairs the struck original with the replacement chip. */
+.draft-original {
+  text-decoration: line-through;
+  color: var(--ink-3);
+}
+.draft-chip { color: var(--accent-text); }
+
+/* Double-click word correction: inline <input> that replaces a .tx-word.
+ * Inherit the serif prose, no box — just a thin accent baseline so it
+ * reads as an in-place edit, not a form field. (Triggers overdub.) */
+.tx-word-input {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper-card);
+  border: 0;
+  border-bottom: 1.5px solid var(--accent);
+  padding: 0 2px;
+  margin: 0;
+  outline: none;
+  letter-spacing: inherit;
+  vertical-align: baseline;
+}
+/* Synthesis in flight: subtle accent shimmer on the baseline. */
+.tx-word-input.synth-pending {
+  border-bottom-color: var(--accent-text);
+  animation: tx-synth-shimmer 1100ms ease-in-out infinite;
+}
+@keyframes tx-synth-shimmer {
+  0%, 100% { border-bottom-color: color-mix(in oklab, var(--accent) 45%, transparent); }
+  50%      { border-bottom-color: var(--accent); }
+}
+/* Inline synthesis error + "live overdub off" hint after the input. */
+.tx-synth-error {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--danger);
+  margin-left: 6px;
+}
+.tx-overdub-disabled {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  margin-left: 6px;
+}
+
+/* Keyboard caret (highest value): arrow-nav drops a thin accent bar on
+ * the leading/trailing edge of the focused word so the insertion point
+ * is visible. Works on both .tx-word and .tx-preview-replacement. */
+.tx-word.has-caret.caret-left,
+.tx-preview-replacement.has-caret.caret-left {
+  box-shadow: inset 1.5px 0 0 var(--accent);
+}
+.tx-word.has-caret.caret-right,
+.tx-preview-replacement.has-caret.caret-right {
+  box-shadow: inset -1.5px 0 0 var(--accent);
+}
+
+/* Filler words: the React build tags um/uh/like/etc. with .filler so the
+ * clean-up sweep can target them. Intentionally a NO-OP visually — a
+ * standing cue here would clash with .tx-word.lowconf (dotted warn
+ * underline) and .tx-word.sweep-hot (solid accent fill) which legitimately
+ * decorate the same words. The sweep provides the only filler highlight. */
+.filler { /* inert by design — see comment above */ }
+
+/* Ripple badge: transient "ripple +N.Ns" status pill floated over the
+ * transcript pane (which is position:relative in editor.css). */
+.ripple-badge {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 5;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+}
+
+/* File drag-over: highlight the transcript / center pane as a drop target. */
+.transcript-pane.file-drag-over,
+.center-pane.file-drag-over {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: var(--accent-bg);
+}
+
+/* Suggestion tiles (SuggestionsPanel): editorial card modelled on .prop
+ * + .view-section-head + .muted-block. */
+.suggestion-tile {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--paper-2);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.suggestion-tile-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.suggestion-tile-head h4 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+.suggestion-tile-body {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 0.95rem;
+  color: var(--ink-3);
+  line-height: 1.45;
+  margin: 0;
+}
+/* Primary action inside a suggestion tile: dark pill that flips to accent
+ * on hover — same language as .prop .actions button.approve. */
+.suggestion-tile button.primary {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--paper-2);
+  cursor: pointer;
+  align-self: flex-start;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.suggestion-tile button.primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+/* Panel banner (ElementsPanel / AgentPanel): inline notice strip. Reads as
+ * a danger-tinted card; .error-text variant keeps the danger ink. */
+.panel-banner {
+  border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--paper-2));
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin: 14px 18px;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.panel-banner.error-text { color: var(--danger); }
+
+/* Editable track-name input (Timeline lane head): the .tl-head-name class is
+ * a styled <span> in the design, but our build also renders it as an <input>
+ * for rename. Neutralise native input chrome so it matches the span's italic
+ * serif look (editor.css .tl-head-name supplies font/colour/ellipsis). */
+input.tl-head-name {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+  outline: none;
+}
+input.tl-head-name:focus {
+  box-shadow: inset 0 -1.5px 0 var(--accent);
+}
+
+/* Timeline filmstrip clip wrapper: a real-build structure (.film-clip holds
+ * .trim handles + .film-frame SVGs + .clip-actions). The design's
+ * .filmstrip .frame selector does NOT match these React classes, so without
+ * rules here they render as unstyled boxes. Keep them quiet + on-brand. */
+.film-clip {
+  position: absolute;
+  inset: 0 auto 0 auto; /* top/bottom 0; left/width set inline */
+  top: 0;
+  bottom: 0;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--paper-2);
+  cursor: grab;
+}
+.film-clip:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.film-clip .film-frame {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: block;
+  border-right: 1px solid var(--line);
+  color: var(--ink-3);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+}
+.film-clip .film-frame:last-of-type { border-right: 0; }
+.film-clip .film-frame .frame-bg {
+  fill: var(--paper-card);
+  stroke: var(--line);
+}
+.film-clip .film-frame.current {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* Trim handles: thin grab strips pinned to each clip edge. */
+.film-clip .trim {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+  z-index: 3;
+}
+.film-clip .trim.start { left: 0; }
+.film-clip .trim.end { right: 0; }
+.film-clip:hover .trim { background: color-mix(in oklab, var(--accent) 35%, transparent); }
+/* Per-clip actions (detach / ×): small buttons over the clip on hover.
+ * .clip-actions itself is flex/gap from editor.css; just place + skin the
+ * timeline variant's buttons (the ClipsPanel variant has its own button look). */
+.film-clip .clip-actions {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 4;
+  margin-top: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.film-clip:hover .clip-actions { opacity: 1; }
+.film-clip .clip-actions button {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--ink);
+  color: var(--paper);
+  border: 0;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.film-clip .clip-actions button:hover { background: var(--accent); color: var(--ink); }

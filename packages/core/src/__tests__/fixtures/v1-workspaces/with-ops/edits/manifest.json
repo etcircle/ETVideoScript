@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "projectId": "with-ops",
+  "source": "input/source.mp4",
+  "createdAt": "2026-05-14T00:00:00.000Z",
+  "updatedAt": "2026-05-14T00:00:00.000Z",
+  "timelineBase": "source-time",
+  "operations": [
+    { "id": "op_cut_0001", "type": "cut", "status": "approved", "start": 1, "end": 2, "reason": "cut", "createdBy": "user", "createdAt": "2026-05-14T00:00:00.000Z" },
+    { "id": "op_mute_0001", "type": "mute", "status": "approved", "start": 3, "end": 4, "reason": "mute", "createdBy": "agent", "createdAt": "2026-05-14T00:00:00.000Z" },
+    { "id": "op_keep_0001", "type": "keep", "status": "proposed", "start": 5, "end": 6, "reason": "keep", "createdBy": "system", "createdAt": "2026-05-14T00:00:00.000Z" },
+    { "id": "op_voice_patch_0001", "type": "voice_patch", "status": "awaiting_approval", "start": 7, "end": 8, "text": "voice", "providerRequestId": null, "createdBy": "agent", "createdAt": "2026-05-14T00:00:00.000Z" },
+    { "id": "op_lipsync_patch_0001", "type": "lipsync_patch", "status": "proposed", "start": 9, "end": 10, "videoAsset": "assets/lipsync/patch.mp4", "providerRequestId": null, "createdBy": "agent", "createdAt": "2026-05-14T00:00:00.000Z" },
+    { "id": "op_caption_override_0001", "type": "caption_override", "status": "approved", "start": 11, "end": 12, "text": "caption", "createdBy": "user", "createdAt": "2026-05-14T00:00:00.000Z" }
+  ],
+  "renderPresets": {
+    "draft": { "resolution": "1280x720", "videoBitrate": "2500k", "audioBitrate": "128k" },
+    "youtube": { "resolution": "source", "videoBitrate": "source-or-auto", "audioBitrate": "192k" }
+  }
+}

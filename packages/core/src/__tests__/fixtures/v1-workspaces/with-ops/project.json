@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "projectId": "with-ops",
+  "title": "With Ops",
+  "createdAt": "2026-05-14T00:00:00.000Z",
+  "updatedAt": "2026-05-14T00:00:00.000Z",
+  "workspacePath": "/tmp/with-ops",
+  "source": {
+    "path": "input/source.mp4",
+    "originalFilename": "source.mp4",
+    "sha256": "stub-sha",
+    "durationSec": 20,
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "audioSampleRate": 48000
+  },
+  "status": { "imported": true, "audioExtracted": false, "transcribed": false, "manifestValid": true, "lastRender": null }
+}

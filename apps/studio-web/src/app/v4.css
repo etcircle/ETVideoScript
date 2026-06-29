@@ -1,0 +1,393 @@
+/* ── v4 additions ───────────────────────────────────────────────── */
+
+/* "Coming soon" affordance for visible-but-unwired chrome */
+button.soon:disabled,
+.soon:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+.tb-soon {
+  font-size: 0.56rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-left: 8px;
+  flex: none;
+}
+
+/* ── Command palette ────────────────────────────────────────────── */
+.cp-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: rgba(23, 20, 17, 0.28);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 11vh;
+}
+.cp {
+  width: 580px;
+  max-width: calc(100vw - 48px);
+  background: var(--paper-card, var(--paper));
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+.cp-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--line);
+}
+.cp-inputrow svg { width: 15px; height: 15px; color: var(--ink-3); flex: none; }
+.cp-inputrow input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+.cp-esc {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 2px 5px;
+  color: var(--ink-3);
+  flex: none;
+}
+.cp-list {
+  max-height: 380px;
+  overflow-y: auto;
+  position: relative;
+  padding: 6px;
+}
+.cp-group {
+  font-size: 0.6rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 9px 10px 4px;
+}
+.cp-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.86rem;
+}
+.cp-item.active { background: var(--paper-2); }
+.cp-glyph { color: var(--accent-text, var(--accent)); width: 14px; text-align: center; flex: none; }
+.cp-label { flex: none; white-space: nowrap; }
+.cp-hint {
+  color: var(--ink-3);
+  font-size: 0.73rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.cp-kbd {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.cp-foot {
+  display: flex;
+  gap: 16px;
+  padding: 8px 15px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-3);
+  font-size: 0.65rem;
+}
+.cp-empty { padding: 26px; text-align: center; color: var(--ink-3); font-size: 0.85rem; }
+
+/* ── Clean-up sweep strip ───────────────────────────────────────── */
+.sweep-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line-strong);
+  background: var(--paper-2);
+  font-size: 0.78rem;
+  flex: none;
+}
+.sweep-kicker {
+  color: var(--accent-text, var(--accent));
+  font-weight: 600;
+  white-space: nowrap;
+  font-size: 0.74rem;
+}
+.sweep-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3); flex: none; }
+.sweep-chip {
+  font-size: 0.62rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  flex: none;
+}
+.sweep-text {
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sweep-time { font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3); flex: none; }
+.sweep-spacer { flex: 1; }
+.sweep-bar button {
+  border: 1px solid var(--line-strong);
+  background: var(--paper);
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: var(--ink);
+  font-family: inherit;
+  flex: none;
+}
+.sweep-bar button:disabled { opacity: 0.35; cursor: default; }
+.sweep-nav { padding: 3px 7px; }
+.sweep-cut { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.sweep-cut .k, .prop-pop-actions .k { font-size: 0.6rem; opacity: 0.65; margin-left: 2px; }
+.sweep-close {
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--ink-3);
+  font-size: 0.95rem;
+  padding: 0 2px !important;
+}
+.sweep-done { color: var(--ink-2); font-style: italic; flex: 1; }
+
+/* Current sweep candidate highlighted in the transcript */
+.tx-word.sweep-hot {
+  background: var(--accent);
+  color: var(--paper);
+  border-radius: 3px;
+}
+
+/* ── Inline proposal popover ────────────────────────────────────── */
+.prop-pop {
+  position: fixed;
+  z-index: 380;
+  width: 320px;
+  background: var(--paper-card, var(--paper));
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.2);
+  padding: 12px 13px;
+  font-size: 0.8rem;
+}
+.prop-pop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.prop-pop-type {
+  text-transform: uppercase;
+  font-size: 0.58rem;
+  letter-spacing: 0.07em;
+  border: 1px solid var(--line-strong);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.prop-pop-type.cut { color: var(--accent-text, var(--accent)); border-color: currentColor; }
+.prop-pop-time { font-family: var(--font-mono); font-size: 0.64rem; color: var(--ink-3); }
+.prop-pop-conf { margin-left: auto; font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink-3); }
+.prop-pop-reason { color: var(--ink); line-height: 1.45; }
+.prop-pop-quote {
+  margin-top: 6px;
+  font-family: var(--font-serif);
+  color: var(--ink-2);
+  line-height: 1.4;
+}
+.prop-pop-quote s { color: var(--ink-3); }
+.prop-pop-from { margin-top: 7px; font-size: 0.66rem; color: var(--ink-3); }
+.prop-pop-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+.prop-pop-actions button {
+  border: 1px solid var(--line-strong);
+  background: var(--paper);
+  border-radius: 5px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-family: inherit;
+  color: var(--ink);
+}
+.prop-pop-actions .approve { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* ── Double-click word correction ───────────────────────────────── */
+.wedit { position: fixed; z-index: 390; display: flex; flex-direction: column; gap: 4px; }
+.wedit input {
+  font-family: var(--font-serif);
+  font-size: 0.95rem;
+  padding: 5px 9px;
+  border: 1.5px solid var(--accent);
+  border-radius: 6px;
+  background: var(--paper-card, var(--paper));
+  color: var(--ink);
+  outline: none;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+}
+.wedit-hint {
+  font-size: 0.6rem;
+  color: var(--ink-3);
+  background: var(--paper-2);
+  align-self: flex-start;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+
+/* Corrected words in the Edits view */
+.tx-correct {
+  border-bottom: 1.5px dotted var(--brand-navy, var(--ink-2));
+  cursor: pointer;
+}
+
+/* ── Shortcut cheat sheet ───────────────────────────────────────── */
+.ks-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: rgba(23, 20, 17, 0.28);
+  display: grid;
+  place-items: center;
+}
+.ks {
+  width: 430px;
+  max-width: calc(100vw - 48px);
+  background: var(--paper-card, var(--paper));
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.28);
+  padding: 18px 20px 20px;
+}
+.ks-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.ks-head h3 { margin: 0; font-family: var(--font-serif); font-weight: 400; font-size: 1.15rem; color: var(--ink); }
+.ks-close { border: 0; background: transparent; color: var(--ink-3); font-size: 1rem; cursor: pointer; }
+.ks-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px 18px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  align-items: center;
+}
+.ks-keys { text-align: right; }
+.ks kbd {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* ── Preview transport additions (speed · skip silences) ────────── */
+.pv-speed-btn, .pv-skip-btn {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  border-radius: 4px;
+  padding: 1px 7px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--ink-2);
+}
+.pv-skip-btn { font-family: inherit; font-size: 0.68rem; }
+.pv-skip-btn.on { color: var(--accent-text, var(--accent)); border-color: currentColor; }
+
+/* ── Clean-up entry button in the transcript header ─────────────── */
+.tp-clean-btn {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--line-strong);
+  background: var(--paper);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.68rem;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-family: inherit;
+  margin-left: auto;
+  margin-right: 8px;
+  white-space: nowrap;
+}
+.tp-clean-btn:hover { border-color: var(--ink-3); color: var(--ink); }
+.tp-clean-count {
+  background: var(--accent);
+  color: var(--paper);
+  border-radius: 999px;
+  font-size: 0.58rem;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+}
+
+/* Disabled transport buttons read clearly */
+.tl-transport button:disabled { opacity: 0.38; cursor: default; }
+
+/* ── Preview meta strip — single compact row (v4) ───────────────── */
+.preview-meta-strip.pv-one-row {
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 10px;
+  overflow: hidden;
+}
+.pv-one-row .aspect-strip-inline { flex-wrap: nowrap; }
+.pv-one-row .aspect-label { display: none; }
+.pv-one-row .pv-status {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Selection bar close (×) ────────────────────────────────────── */
+/* NOTE: the bar is position:absolute (floating overlay) in editor.css —
+   that also serves as the anchor for the × — do not override position. */
+.sel-bar { padding-right: 44px !important; }
+.sel-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.sel-close:hover { color: var(--ink); background: var(--paper-2); }

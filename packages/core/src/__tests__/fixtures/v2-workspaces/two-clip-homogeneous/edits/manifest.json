@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 2,
+  "projectId": "two-clip-homogeneous",
+  "tracks": [{ "trackId": "track_video_001", "kind": "video", "clips": [
+    { "clipId": "clip_001", "assetPath": "assets/video/clip_001/source.mp4", "sourceStart": 0, "sourceEnd": 10 },
+    { "clipId": "clip_002", "assetPath": "assets/video/clip_002/source.mp4", "sourceStart": 0, "sourceEnd": 8 }
+  ] }],
+  "createdAt": "2026-05-14T00:00:00.000Z",
+  "updatedAt": "2026-05-14T00:00:00.000Z",
+  "operations": [
+    { "id": "op_cut_0001", "type": "cut", "clipId": "clip_001", "start": 2, "end": 3, "status": "approved", "createdBy": "user", "createdAt": "2026-05-14T00:00:00.000Z" }
+  ],
+  "renderPresets": { "draft": { "resolution": "1280x720", "videoBitrate": "2500k", "audioBitrate": "128k" }, "youtube": { "resolution": "source", "videoBitrate": "source-or-auto", "audioBitrate": "192k" } }
+}

@@ -1,0 +1,32 @@
+{
+  auto_https off
+  admin off
+}
+
+127.0.0.1:4443, localhost:4443 {
+  tls .tls/lan.pem .tls/lan-key.pem
+
+  handle /api/* {
+    reverse_proxy 127.0.0.1:4317 {
+      header_up X-Forwarded-Proto https
+    }
+  }
+
+  handle /ws/* {
+    reverse_proxy 127.0.0.1:4317 {
+      header_up X-Forwarded-Proto https
+    }
+  }
+
+  handle {
+    reverse_proxy 127.0.0.1:4318 {
+      header_up X-Forwarded-Proto https
+    }
+  }
+
+  encode gzip zstd
+  log {
+    output file ./.tls/access.log
+    format console
+  }
+}

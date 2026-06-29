@@ -1,0 +1,434 @@
+/* realign.css — v3 overrides layered on top of editor.css.
+   Two surfaces: the clean-read + margin-ledger transcript, and the
+   studio-cluster top bar. Only NEW/overriding rules live here. */
+
+/* The v3 shell drops the status strip row — the app grid had a 36px row
+   reserved for .statusbar (topbar · statusbar · main · resize · timeline).
+   Without that element the rows shifted; re-declare with the row removed. */
+.app {
+  grid-template-rows: 56px minmax(0, 1fr) 6px var(--tl-h, 210px);
+}
+
+/* Breadcrumb root is now a plain label (no projects-list page in this build) */
+.crumb .crumb-root { color: var(--ink-3); }
+
+/* ════════════════════════════════════════════════════════════════
+   TRANSCRIPT · Clean read + margin ledger
+   ════════════════════════════════════════════════════════════════ */
+/* Transcript head · v3 — title row + full-width 3-way mode toggle */
+.tp-head-v3 { display: block; padding: 16px 32px 12px; }
+.tp-head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.tp-mode-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  width: 100%;
+  margin-top: 12px;
+}
+.tp-mode-3 button {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line-strong);
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.tp-mode-3 button:last-child { border-right: 0; }
+.tp-mode-3 button:hover { color: var(--ink); }
+.tp-mode-3 button.active { background: var(--ink); color: var(--paper-2); }
+
+.tp-body.tp-clean { padding: 12px 0 200px; }
+
+/* Draft + Original: pure prose, NO rail, single column. */
+.tx-row {
+  display: block;
+}
+.mode-draft .tx-main, .mode-original .tx-main { padding: 0 36px; }
+.mode-draft .tx-row + .tx-row .tx-main,
+.mode-original .tx-row + .tx-row .tx-main { padding-top: 26px; }
+
+/* Audit: a slim op-mark rail only (no timecodes). */
+.mode-audit .tx-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  column-gap: 14px;
+  align-items: start;
+}
+.mode-audit .tx-main { padding: 0 30px 0 0; }
+.mode-audit .tx-row + .tx-row .tx-main { padding-top: 16px; }
+
+.tx-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 2px;
+}
+.tx-row.turn-start .tx-rail { padding-top: 28px; }
+
+.tx-gmarks { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.tx-gmark {
+  width: 19px; height: 19px;
+  display: grid; place-items: center;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  background: var(--paper-2);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+.tx-gmark:hover { border-color: var(--ink); color: var(--ink); background: var(--paper-card); }
+.tx-gmark.cut   { color: var(--accent-text); border-color: color-mix(in oklab, var(--accent) 42%, var(--line-strong)); }
+.tx-gmark.voice { color: var(--ink-blue);   border-color: color-mix(in oklab, var(--ink-blue) 38%, var(--line-strong)); }
+.tx-gmark.speed { color: var(--accent-text); border-color: color-mix(in oklab, var(--accent) 42%, var(--line-strong)); }
+.tx-gmark.mute  { color: var(--ink-3); }
+.tx-gmark.prop  {
+  border-style: dashed;
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 60%, var(--line-strong));
+  background: transparent;
+}
+
+/* Main column */
+.tx-main { min-width: 0; }
+.tx-main .tx-speaker { display: block; margin: 0 0 7px; }
+.tx-main p { margin: 0; }
+
+/* The cut seam — text removed, faint clickable marker */
+.tx-elide {
+  display: inline-block;
+  margin: 0 1px;
+  padding: 0 2px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  vertical-align: 1px;
+  cursor: pointer;
+  border-bottom: 1px dotted var(--line-strong);
+  border-radius: 2px;
+  transition: color 140ms ease, background 140ms ease;
+}
+.tx-elide:hover { color: var(--accent-text); background: var(--accent-bg); }
+
+/* Voice-patched text reads inline; faint blue underline, no chrome */
+.tx-vp {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--ink-blue) 7%, transparent);
+  border-bottom: 1.5px solid color-mix(in oklab, var(--ink-blue) 45%, transparent);
+  border-radius: 2px;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.tx-vp:hover { background: color-mix(in oklab, var(--ink-blue) 13%, transparent); }
+
+/* Sped run — faded italic, hairline accent underline, trailing factor */
+.tx-word.fx-speed {
+  font-style: italic;
+  color: var(--ink-3);
+  border-bottom: 1.5px solid color-mix(in oklab, var(--accent) 48%, transparent);
+  border-radius: 0;
+  padding-bottom: 1px;
+}
+.tx-word.fx-speed:hover { background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.tx-speedsup {
+  font-family: var(--font-mono);
+  font-style: normal;
+  font-size: 0.52rem;
+  color: var(--accent-text);
+  vertical-align: 0.5em;
+  letter-spacing: 0;
+  margin: 0 2px 0 1px;
+}
+
+/* Muted run — greyed + struck, still selectable */
+.tx-word.fx-mute {
+  color: var(--ink-3);
+  text-decoration: line-through;
+  text-decoration-color: var(--ink-blue);
+  text-decoration-thickness: 1px;
+  opacity: 0.78;
+}
+
+/* Proposed run — dashed accent underline, stays readable + selectable */
+.tx-word.is-prop {
+  text-decoration: underline dashed;
+  text-decoration-color: color-mix(in oklab, var(--accent) 60%, transparent);
+  text-underline-offset: 4px;
+  text-decoration-thickness: 1.5px;
+  color: var(--ink);
+}
+.tx-word.is-prop:hover { background: var(--accent-bg); }
+
+/* Low-confidence ASR — quiet dotted amber underline (the new trust cue) */
+.tx-word.lowconf {
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in oklab, var(--warn) 62%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+}
+.tx-word.lowconf:hover {
+  text-decoration-color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 12%, transparent);
+}
+/* selection/current always win over the dotted cue */
+.tx-word.selected, .tx-word.current { text-decoration: none; }
+
+/* ════════════════════════════════════════════════════════════════
+   TOP BAR · Studio cluster
+   ════════════════════════════════════════════════════════════════ */
+.topbar-right { gap: 8px; }
+
+/* ⌘K as a compact icon button */
+.tb-btn.tb-icon { padding: 6px 9px; color: var(--ink-3); gap: 5px; }
+.tb-btn.tb-icon:hover { color: var(--ink); }
+.tb-btn.tb-icon svg { width: 14px; height: 14px; }
+.tb-btn.tb-icon .kbd { margin-left: 0; }
+
+/* Studio Sound — calm ghost, accent reserved for the ✦ glyph only */
+.tb-btn.tb-studio { color: var(--ink-2); }
+.tb-btn.tb-studio:hover { border-color: var(--ink); color: var(--ink); }
+.tb-btn.tb-studio .sparkle { color: var(--accent-text); }
+.tb-btn.tb-studio.busy {
+  border-color: var(--accent-text);
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+.tb-btn.tb-studio .mini-spin {
+  width: 11px; height: 11px; border-radius: 999px;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  display: inline-block;
+  animation: spin 0.9s linear infinite;
+}
+
+/* Render cluster — a single grouped control so the primary owns the eye */
+.tb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--paper-card);
+}
+.tb-group .tb-btn { border-color: transparent; background: transparent; }
+.tb-group .tb-btn.ghost:hover { background: var(--paper-3); border-color: transparent; color: var(--ink); }
+.tb-group .tb-btn.primary { background: var(--ink); border-color: var(--ink); color: var(--paper-2); }
+.tb-group .tb-btn.primary:hover { background: var(--accent); border-color: var(--accent); color: var(--ink); }
+
+/* ··· project overflow menu */
+.tb-ovf-wrap { position: relative; }
+.tb-ovf {
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-3);
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.tb-ovf svg { width: 15px; height: 15px; }
+.tb-ovf:hover, .tb-ovf.open { border-color: var(--ink); color: var(--ink); }
+.tb-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 208px;
+  background: var(--paper-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-editorial);
+  padding: 5px;
+  z-index: 40;
+  animation: rise 160ms ease;
+}
+.tb-menu-item {
+  width: 100%;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+  text-align: left;
+  transition: background 130ms ease, color 130ms ease;
+}
+.tb-menu-item:hover { background: var(--paper-3); color: var(--ink); }
+.tb-menu-item .hint {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.tb-menu-sep { height: 1px; background: var(--line); margin: 5px 4px; }
+
+/* ════════════════════════════════════════════════════════════════
+   TIMELINE · de-squish the track headers
+   Wider header column (set in timeline-v3.jsx) + roomier rows so the
+   FX rack, transport toggles, and add-audio button stop crowding.
+   ════════════════════════════════════════════════════════════════ */
+.tl-head { padding: 9px 14px 11px; gap: 6px; }
+.tl-head-row { gap: 8px; }
+.tl-head-id { padding: 2px 7px; }
+.tl-head-name { font-size: 0.9rem; }
+.tl-head-controls { gap: 6px; margin-top: 1px; }
+
+.tl-icon-btn { width: 26px; height: 23px; }
+.tl-icon-btn svg { width: 14px; height: 14px; }
+
+/* Audio FX rack — give the EN / DN / DR chips room to breathe */
+.tl-fx-rack { gap: 5px; margin-top: 6px; }
+.tl-fx-chip { padding: 3px 8px; font-size: 0.58rem; letter-spacing: 0.08em; line-height: 1.3; }
+
+/* Caption row controls + style chip */
+.tl-cap-style { padding: 2px 7px; font-size: 0.56rem; }
+
+/* Add-audio button — separated from the last track, easier to hit */
+.tl-add-track { padding: 12px 14px 14px; }
+.tl-add-track-btn { padding: 9px 10px; }
+
+/* Tracks-column header label */
+.tl-heads-spacer { padding: 0 14px; }
+
+/* ════════════════════════════════════════════════════════════════
+   AI TAB · Studio Sound card (moved off the top bar)
+   ════════════════════════════════════════════════════════════════ */
+.studio-run {
+  width: 100%;
+  display: flex; align-items: center; gap: 12px;
+  text-align: left;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 11px 12px;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
+}
+.studio-run:hover { border-color: var(--ink); background: var(--paper-card); transform: translateY(-1px); }
+.studio-run.on { border-color: var(--live); background: color-mix(in oklab, var(--live) 8%, var(--paper)); }
+.studio-run.busy { border-color: var(--accent-text); background: var(--accent-bg); cursor: default; }
+.studio-glyph {
+  flex-shrink: 0;
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-strong);
+  background: var(--paper-2);
+  color: var(--accent-text);
+  font-size: 0.95rem;
+}
+.studio-run.on .studio-glyph { color: var(--live); border-color: var(--live); }
+.studio-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.studio-title { font-family: var(--font-sans); font-size: 0.9rem; font-weight: 500; color: var(--ink); }
+.studio-sub {
+  font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.studio-cta {
+  flex-shrink: 0;
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.13em;
+  text-transform: uppercase; color: var(--ink-2);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-pill);
+  padding: 4px 11px;
+}
+.studio-run:hover .studio-cta { border-color: var(--ink); color: var(--ink); }
+.studio-spin {
+  flex-shrink: 0;
+  width: 14px; height: 14px; border-radius: 999px;
+  border: 1.5px solid var(--accent-text); border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   CHANGES panel — referenceable history of applied edits
+   ════════════════════════════════════════════════════════════════ */
+.view-changes { padding: 14px 18px 22px; }
+.ch-summary {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 2px 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+.ch-count {
+  font-family: var(--font-serif); font-size: 2.1rem; line-height: 0.9;
+  color: var(--ink); letter-spacing: -0.02em;
+}
+.ch-summary-text { display: flex; flex-direction: column; gap: 3px; font-family: var(--font-serif); font-size: 1.02rem; color: var(--ink); }
+.ch-summary-meta {
+  font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+
+.ch-list { display: flex; flex-direction: column; gap: 8px; }
+.ch-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  padding: 10px 12px 11px;
+  transition: border-color 150ms ease;
+}
+.ch-item:hover { border-color: var(--line-strong); }
+.ch-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.ch-type {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-2);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-xs);
+  padding: 2px 7px; background: var(--paper-2);
+}
+.ch-type .g { font-weight: 700; color: var(--accent-text); }
+.ch-type.mute .g { color: var(--ink-blue); }
+.ch-type.voice_patch .g, .ch-type.speed .g { color: var(--accent-text); }
+.ch-src {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.ch-src-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--ink-3); }
+.ch-src.you .ch-src-dot { background: var(--ink); }
+.ch-src.agent .ch-src-dot { background: var(--accent); }
+.ch-time { margin-left: auto; font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink-3); }
+.ch-reason { font-family: var(--font-serif); font-style: italic; font-size: 0.98rem; color: var(--ink); line-height: 1.35; }
+.ch-quote {
+  font-family: var(--font-serif); font-size: 0.88rem;
+  background: var(--paper-3); border-left: 2px solid var(--accent);
+  padding: 4px 10px; margin-top: 6px; border-radius: 2px; color: var(--ink-2);
+}
+.ch-quote .strike { text-decoration: line-through; opacity: 0.55; }
+.ch-quote .ins { color: var(--accent-text); font-style: italic; }
+.ch-actions { display: flex; gap: 6px; margin-top: 9px; }
+.ch-btn {
+  background: transparent; border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill); padding: 5px 11px;
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-2); cursor: pointer;
+  transition: all 150ms ease;
+}
+.ch-btn:hover { border-color: var(--ink); color: var(--ink); }
+.ch-btn.danger { color: var(--ink-3); }
+.ch-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+.ch-pending-note {
+  width: 100%;
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 12px;
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: 9px 12px;
+  font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-3); cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+.ch-pending-note:hover { border-color: var(--accent); color: var(--accent-text); }
+.ch-pending-note em { color: var(--accent-text); font-style: normal; }
+.ch-pending-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--accent); }

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "projectId": "two-clip-heterogeneous",
+  "title": "Two Clip Heterogeneous",
+  "createdAt": "2026-05-14T00:00:00.000Z",
+  "updatedAt": "2026-05-14T00:00:00.000Z",
+  "workspacePath": ".",
+  "clipSources": [
+    { "clipId": "clip_001", "path": "assets/video/clip_001/source.mp4", "originalFilename": "a.mp4", "sha256": "a", "durationSec": 10, "width": 1280, "height": 720, "fps": 30, "audioSampleRate": 48000, "videoCodec": "h264", "audioCodec": "aac", "pixelFormat": "yuv420p" },
+    { "clipId": "clip_002", "path": "assets/video/clip_002/source.mp4", "originalFilename": "b.mp4", "sha256": "b", "durationSec": 8, "width": 1920, "height": 1080, "fps": 24, "audioSampleRate": 44100, "videoCodec": "h264", "audioCodec": "aac", "pixelFormat": "yuv420p" }
+  ],
+  "status": { "imported": true, "audioExtracted": false, "transcribed": false, "manifestValid": true, "lastRender": null }
+}

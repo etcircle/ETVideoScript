@@ -1,0 +1,126 @@
+openapi: 3.1.0
+info:
+  title: ETVideoScript Settings API
+  version: 0.1.0
+paths:
+  /api/settings/providers:
+    get:
+      operationId: listSettingsProviders
+      responses:
+        '200': { description: Provider registry plus CAS snapshot }
+    post:
+      operationId: createSettingsProvider
+      responses:
+        '200': { description: Created provider }
+  /api/settings/providers/{id}:
+    put:
+      operationId: updateSettingsProvider
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated provider }
+    delete:
+      operationId: deleteSettingsProvider
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Removed provider }
+  /api/settings/providers/{id}/default:
+    post:
+      operationId: setDefaultSettingsProvider
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Default provider set }
+        '409': { description: Paid acknowledgement or stale settings conflict }
+  /api/settings/providers/{id}/test:
+    post:
+      operationId: testSettingsProvider
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Probe succeeded }
+        '400': { description: Invalid URL or SSRF blocked }
+        '502': { description: Probe failed }
+  /api/settings/secrets/{ref}:
+    put:
+      operationId: setSettingsSecret
+      parameters:
+        - { name: ref, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Secret metadata, never secret value }
+    delete:
+      operationId: deleteSettingsSecret
+      parameters:
+        - { name: ref, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Secret metadata, never secret value }
+  /api/settings/voices:
+    get:
+      operationId: listSettingsVoices
+      responses:
+        '200': { description: Voice library entries }
+    post:
+      operationId: upsertSettingsVoice
+      responses:
+        '200': { description: Created or updated voice }
+        '400': { description: Invalid voice payload }
+  /api/settings/voices/clone:
+    post:
+      operationId: cloneSettingsVoice
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [sample, name]
+              properties:
+                sample: { type: string, format: binary }
+                name: { type: string }
+                description: { type: string }
+                originProjectId: { type: string }
+      responses:
+        '200': { description: Cloned and registered voice }
+        '400': { description: Missing ElevenLabs key or invalid clone payload }
+        '413': { description: Voice sample too large }
+        '502': { description: Provider clone failed }
+  /api/settings/voices/{id}:
+    patch:
+      operationId: renameSettingsVoice
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        '200': { description: Renamed voice }
+        '400': { description: Invalid voice name }
+        '404': { description: Voice not found }
+    delete:
+      operationId: deleteSettingsVoice
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Removed voice }
+        '404': { description: Voice not found }
+  /api/settings/workspace/{projectId}:
+    get:
+      operationId: getWorkspaceSettings
+      parameters:
+        - { name: projectId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Workspace settings plus CAS snapshot }
+    put:
+      operationId: putWorkspaceSettings
+      parameters:
+        - { name: projectId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Workspace settings written }
+        '409': { description: Stale workspace settings snapshot }
