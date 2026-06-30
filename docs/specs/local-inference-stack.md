@@ -1,8 +1,11 @@
 # Spec: self-hosted inference stack on the Mac Mini (ElevenLabs replacement)
 
-Status: draft, not yet implemented.
+Status: in progress — all three model servers built and verified locally; Tailscale
+networking up between the Mac Mini and the MacBook with a locked-down ACL; launchd
+daemonization and the repo-side provider adapters are the remaining work (see
+"Status" below).
 Owner: Nikola.
-Last updated: 2026-06-30.
+Last updated: 2026-07-01.
 
 ## Goal
 
@@ -19,26 +22,26 @@ dozen+ tab processes, 3 concurrent `claude` sessions, Antigravity IDE, iTerm all
 resident). Loading model weights into that same pool risks swap/latency spikes
 during the exact moment they're needed: a live recording or processing session.
 
-The Mac Mini (8GB, on the LAN at `mac-mini.local` / `192.168.178.153`, separate
-macOS account, currently runs no services — Remote Login/SSH is off) has no such
-contention. A dedicated, idle, single-purpose 8GB box beats a contended 32GB one,
-provided the servers don't try to keep every model resident simultaneously — see
-"Memory budget" below.
+**Correction (2026-07-01):** this Mac Mini actually has **16GB RAM**, not 8GB as
+originally assumed (verified via `sysctl hw.memsize`), and the work in this spec
+is being run directly on it under the `otto` account rather than over SSH to a
+separate account. At 16GB all three models can stay resident permanently — no
+lazy-load/unload scheme is needed (see "Memory budget" below, superseded).
 
 ## Target architecture
 
 Three small local HTTP servers on the Mac Mini, each a thin wrapper around an
-open-source model, reachable from the MacBook over the LAN at `http://mac-mini.local:<port>`.
-`@etvideoscript/core`'s provider registry already supports this shape — local-tier
-HTTP adapters with a configurable `baseUrl` — this is the same pattern
-`stt.homelab-whisper` already uses today.
+open-source model, reachable from the MacBook over **Tailscale** (not plain LAN —
+see "Network and auth" below). `@etvideoscript/core`'s provider registry already
+supports this shape — local-tier HTTP adapters with a configurable `baseUrl` —
+this is the same pattern `stt.homelab-whisper` already uses today.
 
-| Capability | Model | Port | Repo provider id | Code change needed |
-|---|---|---|---|---|
-| STT | `whisperx-mlx` (Whisper-large-v3-turbo + wav2vec2 forced alignment, MLX backend) | 8789 | `stt.homelab-whisper` (unchanged) | **None** — if the new server implements the same OpenAI-compatible `POST /v1/audio/transcriptions` contract (`response_format=verbose_json`, `timestamp_granularities[]=word`), the existing adapter (`packages/core/src/providers/stt/homelabWhisper.ts`) works as-is. Just point `ETVS_WHISPER_BASE_URL=http://mac-mini.local:8789/v1/audio/transcriptions` instead of `127.0.0.1`. |
-| TTS / voice cloning | Chatterbox-Turbo via `mlx-audio` (Blaizzy/mlx-audio) | 8791 | `tts.mlx-chatterbox` (new) | New adapter file `providers/tts/mlxChatterbox.ts`, registry import, conformance test. |
-| Studio-sound (denoise) | DeepFilterNet3 via CoreML | 8792 | `studio-sound.deepfilternet` (new) | New adapter file `providers/studio-sound/deepfilternet.ts`, registry import, conformance test. |
-| Music-gen | — | — | stays `music-gen.mock` | Out of scope — low-value feature, not worth chasing yet. |
+| Capability | Model | Port | Repo provider id | Code change needed | Status |
+|---|---|---|---|---|---|
+| STT | mlx-whisper (`whisper-large-v3-turbo`) + whisperx wav2vec2 forced alignment | 8789 | `stt.homelab-whisper` (unchanged) | **None** — server implements the existing OpenAI-compatible `POST /v1/audio/transcriptions` contract (`response_format=verbose_json`, `timestamp_granularities[]=word`), so the existing adapter (`packages/core/src/providers/stt/homelabWhisper.ts`) works as-is. Point `ETVS_WHISPER_BASE_URL` at the Tailscale address (see "Using the servers"). | **Built + verified.** Real word-level timestamps confirmed; non-English audio falls back to segment-level `"timing":"approximate"`; a silence-hallucination bug in mlx-whisper ("Thank you." on pure digital silence) found and fixed with an RMS energy pre-check. |
+| TTS / voice cloning | Chatterbox via `mlx-audio` (Blaizzy/mlx-audio) | 8791 | `tts.mlx-chatterbox` (new) | New adapter file `providers/tts/mlxChatterbox.ts`, registry import, conformance test. | **Built + verified.** Voice cloning confirmed genuine (different reference clips produce measurably different output) from the reference *audio* alone — Chatterbox's actual `generate()` API has **no `ref_text` parameter**, contrary to the original assumption below. |
+| Studio-sound (denoise) | DeepFilterNet3 (plain PyTorch, not CoreML — see below) | 8792 | `studio-sound.deepfilternet` (new) | New adapter file `providers/studio-sound/deepfilternet.ts`, registry import, conformance test. | **Built + verified.** Clean install once pinned to Python 3.11 + `torch`/`torchaudio` 2.1.2 (newer torchaudio dropped a module `df/io.py` needs) — no Rust toolchain build required. |
+| Music-gen | — | — | stays `music-gen.mock` | Out of scope — low-value feature, not worth chasing yet. | Not started. |
 
 ### Why STT needs zero adapter code
 
@@ -48,41 +51,58 @@ and `ETVS_WHISPER_BASE_URL` in `packages/core/src/providerSettings.ts:450`). The
 Mac Mini's `whisperx-mlx` server just needs to expose the same endpoint shape. This
 is the cheapest part of the migration.
 
-### Memory budget on the Mac Mini (8GB)
+### Memory budget on the Mac Mini (16GB, corrected)
 
 STT and TTS are not used concurrently in the actual editing workflow — STT runs at
 transcription time, TTS at voice-patch time, denoise at studio-sound-enhance time.
-Each server should lazy-load its model on first request and unload after an idle
-timeout (a few minutes), rather than holding all three models resident permanently.
-DeepFilterNet3 is tiny enough (~10MB, CoreML/Neural Engine, not GPU) to stay
-resident without meaningfully affecting the budget.
+At the corrected 16GB figure, **all three models stay resident permanently** (no
+lazy-load/unload) — affordable on an otherwise-idle, single-purpose box, and it
+eliminates first-request cold-load latency entirely. Revisit only if Activity
+Monitor shows real swap/memory-pressure under daily use.
 
-If lazy-load/unload turns out to be too slow in practice (model load latency on
-first request after idle), the fallback is to split further: keep denoise + STT
-resident on the Mac Mini, and decide later whether TTS needs to move elsewhere.
+## Network and auth (superseded — Tailscale-only, no LAN-plaintext path)
 
-## Network and auth
+An earlier draft of this section planned LAN reachability at `mac-mini.local` with
+a firewall allow-rule as the perimeter and basic-auth as the only secret. **That
+plan was revised before implementation** after a two-model review (Opus + Codex)
+both independently flagged it as the standout security problem: HTTP basic-auth
+over plain LAN traffic on a `0.0.0.0` bind is crackable by anything on the same
+network — Tailscale's encryption only covers its own interface, not the LAN one.
 
-- Use the mDNS hostname `mac-mini.local`, not a static LAN IP — already resolves
-  correctly from the MacBook, avoids DHCP-lease churn.
-- These servers are now reachable beyond loopback, unlike the implicit
-  `127.0.0.1:8789` assumption in the current homelab-whisper default. Each server
-  must require a shared-secret bearer/basic-auth token, following the existing
-  `WHISPER_BASIC_AUTH` / `ETVS_WHISPER_BASIC_AUTH` pattern already supported end to
-  end (`packages/core/src/providers/stt/homelabWhisper.ts`,
-  `packages/core/src/providerSettings.ts:470`). Add equivalent secret support for
-  the two new servers/adapters.
-- macOS firewall on the Mac Mini needs an explicit allow rule for ports 8789/8791/8792
-  from the LAN.
+**What's actually running instead:**
+- All three servers bind to **`127.0.0.1` only** — never reachable except through
+  a deliberate proxy.
+- **Tailscale** (WireGuard mesh, MagicDNS) is up between this Mac Mini
+  (`otto-mac-mini`, tailnet `ottomoriyama@outlook.com`) and the MacBook
+  (`nn-mb-home`) — confirmed connected via `tailscale ping` (direct LAN path when
+  on the same network, automatically falls back to relay/DERP when traveling, no
+  config change needed either way).
+- **Tailnet ACL locked down** (pasted into the admin console at
+  `https://login.tailscale.com/admin/acls/file`, replacing the default allow-all):
+  only a device tagged `tag:etvs-client` (the MacBook) can reach a device tagged
+  `tag:etvs-server` (this Mac Mini), and only on ports 8789/8791/8792. Nothing else
+  — no SSH, no Taildrop, no other port, no other device gets default access. Apple's
+  own AirDrop is unaffected (Bluetooth/AWDL, not IP-routed, so untouched by this).
+- Each server requires `Authorization: Bearer <token>` (a single shared static
+  token, generated once, kept in a chmod-600 file) on every route except `/health`
+  — this travels the existing `basicAuth`-named field on the homelab-whisper
+  adapter and the same convention on the two new adapters; the field name is
+  legacy, the value is a raw `Bearer ...` header, not actual HTTP Basic encoding.
+- Once the launchd daemons (below) are running, `tailscale serve` exposes each
+  loopback-bound port onto the tailnet with a real MagicDNS TLS cert, so even the
+  bearer token travels encrypted end-to-end — no separate plaintext fallback to
+  misconfigure.
 
 ## Process management on the Mac Mini
 
-Use `launchd` **LaunchDaemons**, not LaunchAgents — the Mac Mini's account won't
-necessarily have an interactive session logged in, and a LaunchDaemon runs
-regardless of login state and restarts on crash via `KeepAlive`. Three plists,
-one per server, each invoking the server's start command and binding to
-`0.0.0.0:<port>` (LAN-only firewall rule + auth token is the actual security
-boundary, not bind address).
+Use `launchd` **LaunchDaemons**, not LaunchAgents, so each server restarts on
+crash via `KeepAlive` and doesn't depend on an interactive login session. Three
+plists, one per server, each running as the **`otto` user** (not root — a second
+review finding; root-owned ML server processes are an unnecessary privilege jump
+and won't find `~/.cache/huggingface` or `~/models/voices` under a bare system
+context anyway), with `HOME`/`PATH` set explicitly and binding `127.0.0.1` only
+(see "Network and auth" above — there is nothing to firewall on the LAN interface
+since these never bind to it).
 
 ## Repo-side work (this branch / follow-up PRs)
 
@@ -102,26 +122,91 @@ boundary, not bind address).
    tests and Settings UI references — **explicitly held back from this spec**,
    should be a separate confirmed step once the replacements are verified working.
 
-## Mac Mini setup steps (run under the Mac Mini's own account)
+## Status (2026-07-01)
 
-1. Install a Python toolchain (`uv` recommended) or the native runtime each server
-   needs (`whisperx-mlx`, `mlx-audio`, a DeepFilterNet3 CoreML wrapper).
-2. Download model weights: Whisper-large-v3-turbo (MLX), Chatterbox-Turbo
-   checkpoint, DeepFilterNet3 CoreML model.
-3. Write/vendor three small HTTP server wrappers exposing the contracts above.
-4. Create and load three `launchd` `LaunchDaemon` plists (`/Library/LaunchDaemons/`,
-   needs `sudo` to install) with `KeepAlive: true`.
-5. Add firewall allow rules for 8789/8791/8792 from the LAN.
-6. From the MacBook, verify each server: `curl http://mac-mini.local:<port>/health`
-   (or equivalent) before pointing the repo's provider settings at them.
+Done:
+- Tailscale installed and connected (`otto-mac-mini` ↔ `nn-mb-home`), ACL locked
+  to the three model ports only (see "Network and auth").
+- All three servers built, dependency-pinned, and curl-verified end to end
+  (health-readiness, auth success/failure, malformed-input rejection, oversized-
+  input rejection) under `~/etvs-inference/{stt,tts,denoise}-server/`.
 
-## Open questions
+Remaining:
+- Install the three as launchd LaunchDaemons (`otto` user, not root) so they
+  survive reboots instead of being started by hand.
+- Run `tailscale serve` to expose each loopback-bound port onto the tailnet with
+  a real TLS cert.
+- Write the two new repo-side adapters (`tts/mlxChatterbox.ts`,
+  `studio-sound/deepfilternet.ts`) and their conformance tests, per the table above.
+- ElevenLabs adapter retirement (still explicitly out of scope for this pass).
 
-- Exact `mlx-audio` Chatterbox-Turbo wrapper: vendor an existing project or write a
-  thin FastAPI/Python wrapper ourselves — needs a look at what `mlx-audio` exposes
-  out of the box vs. what the `tts.mlx-chatterbox` adapter needs (raw WAV bytes in,
-  `audio: Buffer, mimeType` out).
-- DeepFilterNet3 CoreML wrapper: same question — `MetalVoice`/`soniqo/speech-swift`
-  are reference implementations, not necessarily drop-in servers.
-- Final call on deleting vs. disabling-but-keeping the ElevenLabs adapters as a
-  fallback path, once the replacements are proven in daily use.
+## Using the servers
+
+**Manual start (current state, until the launchd daemons land):**
+```bash
+cd ~/etvs-inference/stt-server     && ETVS_STT_TOKEN=<token>     .venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8789 &
+cd ~/etvs-inference/tts-server     && ETVS_TTS_TOKEN=<token>     .venv/bin/uvicorn server:app --host 127.0.0.1 --port 8791 &
+cd ~/etvs-inference/denoise-server && ETVS_DENOISE_TOKEN=<token> .venv/bin/python server.py &
+```
+Each prints a random token at startup if the env var is unset — useful for ad hoc
+testing, but use a real generated token (`openssl rand -hex 32`) for anything
+persistent.
+
+**Contracts (all require `Authorization: Bearer <token>` except `/health`):**
+```bash
+# STT — word-level transcript
+curl -F file=@clip.wav -F response_format=verbose_json -F "timestamp_granularities[]=word" \
+  -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8789/v1/audio/transcriptions
+
+# TTS — voice cloning from a reference clip dropped at ~/models/voices/<voice>.wav
+# (voice slug must match ^[a-z0-9][a-z0-9-]{0,63}$ — no ref_text file needed, see table above)
+curl -F text="hello world" -F voice=default -F language=en \
+  -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8791/v1/tts -o out.wav
+
+# Denoise
+curl -F file=@noisy.wav -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8792/v1/enhance -o clean.wav
+```
+
+**From the MacBook**, once `tailscale serve` is live, swap `127.0.0.1` for the
+Tailscale MagicDNS name (`https://otto-mac-mini.<tailnet>.ts.net:<port>`) — this
+works identically whether on the home LAN or traveling, since both routes go
+through Tailscale and the ACL only allows the tagged MacBook through anyway.
+
+## Integration ideas (not yet built)
+
+**Hermes + cc-telegram (voice-message handling).** Hermes' gateway
+(`~/.hermes`, a `launchd` LaunchAgent listening on `localhost:9177`) and
+`cc-telegram` (`~/code/cc-telegram`, the Telegram↔tmux↔Claude-Code bridge) are
+both local processes on this same Mac Mini — wiring either to call
+`127.0.0.1:8789`/`8791` directly for voice-message transcription/replies adds no
+new network exposure (it's one local process calling another). `cc-telegram` is
+currently text-only (no voice handling in its current codebase), so this would be
+new functionality there, not a config flip. Before wiring it up: confirm the
+Telegram bot only accepts messages from Nikola's chat ID — if it's reachable by
+anyone who finds the bot, that's an independent exposure question worth closing
+first, separate from anything in this spec.
+
+**Local dictation into Claude Code.** Lowest-friction path: macOS Shortcuts.app's
+built-in global-hotkey support (no extra app install) bound to a small script
+that records a few seconds via `ffmpeg`'s `avfoundation` mic input, POSTs to
+`127.0.0.1:8789/v1/audio/transcriptions`, and pastes the transcript into the
+focused window (clipboard + simulated paste). Not yet built.
+
+## Resolved questions
+
+- ~~Exact `mlx-audio` Chatterbox wrapper~~ — resolved: `mlx_audio.tts.utils.load_model("mlx-community/chatterbox-fp16")`
+  + `model.generate(text=..., audio_prompt=<mx.array>, audio_prompt_sr=..., lang_code=...)`,
+  a generator yielding `GenerationResult(audio, sample_rate)`. No `ref_text` param exists.
+  MLX binds its GPU command stream to the thread that first touches it, so all
+  model load + generation calls must run on a single dedicated worker thread, not
+  the default async thread pool (`asyncio.to_thread` throws otherwise).
+- ~~DeepFilterNet3 CoreML wrapper~~ — resolved by **not** doing a CoreML
+  conversion: the referenced projects (`MetalVoice`/`soniqo/speech-swift`) are
+  reference implementations, not installable packages, and a real PyTorch→CoreML
+  conversion is multi-day work with real conversion-fidelity risk. Plain
+  `deepfilternet` (PyTorch-backed) ships a working server today and runs
+  comfortably faster than realtime on the M4; CoreML conversion is a possible
+  later optimization, not a blocker.
+- Still open: final call on deleting vs. disabling-but-keeping the ElevenLabs
+  adapters as a fallback path, once the replacements are proven in daily use.

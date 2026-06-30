@@ -22,4 +22,5 @@ memory/
 .claude/.curate/
 .claude/hooks/
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
 .cgcignore
