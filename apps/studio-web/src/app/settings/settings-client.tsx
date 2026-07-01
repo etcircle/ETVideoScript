@@ -47,6 +47,8 @@ const PROVIDER_TEMPLATES = [
   { name: 'ElevenLabs', secretRef: 'elevenlabs', baseUrl: 'https://api.elevenlabs.io', tier: 'paid' as const, kinds: ['tts', 'music-gen', 'studio-sound', 'stt'] as const },
   { name: 'OpenAI', secretRef: 'openai', baseUrl: 'https://api.openai.com', tier: 'paid' as const, kinds: ['stt'] as const, providerIdSuffix: 'openai-whisper' },
   { name: 'Homelab Whisper', secretRef: undefined, baseUrl: 'http://127.0.0.1:8789/v1/audio/transcriptions', tier: 'local' as const, kinds: ['stt'] as const },
+  { name: 'MLX Chatterbox', secretRef: undefined, baseUrl: 'http://127.0.0.1:8791/v1/tts', tier: 'local' as const, kinds: ['tts'] as const },
+  { name: 'DeepFilterNet', secretRef: undefined, baseUrl: 'http://127.0.0.1:8792/v1/enhance', tier: 'local' as const, kinds: ['studio-sound'] as const },
   { name: 'FFmpeg local', secretRef: undefined, baseUrl: undefined, tier: 'local' as const, kinds: ['studio-sound'] as const }
 ];
 

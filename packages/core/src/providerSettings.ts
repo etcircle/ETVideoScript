@@ -470,12 +470,54 @@ export function resolveWhisperBasicAuth(env: Record<string, string | undefined> 
   return env.ETVS_WHISPER_BASIC_AUTH ?? env.WHISPER_BASIC_AUTH ?? env.ETVIDEO_WHISPER_BASIC_AUTH;
 }
 
+const CHATTERBOX_BASE_URL_ENV_KEYS = [
+  'ETVS_CHATTERBOX_BASE_URL',
+  'ETVIDEO_CHATTERBOX_BASE_URL'
+] as const;
+
+export function resolveChatterboxBaseUrl(env: Record<string, string | undefined> = process.env): string | undefined {
+  for (const key of CHATTERBOX_BASE_URL_ENV_KEYS) {
+    const value = env[key];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+export function resolveChatterboxBasicAuth(env: Record<string, string | undefined> = process.env): string | undefined {
+  return env.ETVS_CHATTERBOX_BASIC_AUTH ?? env.ETVIDEO_CHATTERBOX_BASIC_AUTH;
+}
+
+const DEEPFILTERNET_BASE_URL_ENV_KEYS = [
+  'ETVS_DEEPFILTERNET_BASE_URL',
+  'ETVIDEO_DEEPFILTERNET_BASE_URL'
+] as const;
+
+export function resolveDeepFilterNetBaseUrl(env: Record<string, string | undefined> = process.env): string | undefined {
+  for (const key of DEEPFILTERNET_BASE_URL_ENV_KEYS) {
+    const value = env[key];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+export function resolveDeepFilterNetBasicAuth(env: Record<string, string | undefined> = process.env): string | undefined {
+  return env.ETVS_DEEPFILTERNET_BASIC_AUTH ?? env.ETVIDEO_DEEPFILTERNET_BASIC_AUTH;
+}
+
 export function importLegacyEnvProviders(input: SettingsPathsInput & { env?: Record<string, string | undefined> } = {}): ProviderRecord[] {
   const env = input.env ?? process.env;
   const imported: ProviderRecord[] = [];
   const whisperUrl = resolveWhisperBaseUrl(env);
   if (whisperUrl) {
     imported.push(upsertProvider({ ...input, provider: { id: 'stt.homelab-whisper', kind: 'stt', name: 'homelab-whisper', tier: 'local', baseUrl: whisperUrl, enabled: true, default: true, source: 'env-import' } }));
+  }
+  const chatterboxUrl = resolveChatterboxBaseUrl(env);
+  if (chatterboxUrl) {
+    imported.push(upsertProvider({ ...input, provider: { id: 'tts.mlx-chatterbox', kind: 'tts', name: 'mlx-chatterbox', tier: 'local', baseUrl: chatterboxUrl, enabled: true, default: true, source: 'env-import' } }));
+  }
+  const deepFilterNetUrl = resolveDeepFilterNetBaseUrl(env);
+  if (deepFilterNetUrl) {
+    imported.push(upsertProvider({ ...input, provider: { id: 'studio-sound.deepfilternet', kind: 'studio-sound', name: 'deepfilternet', tier: 'local', baseUrl: deepFilterNetUrl, enabled: true, default: true, source: 'env-import' } }));
   }
   const studio = env.ETVS_STUDIO_SOUND_PROVIDER;
   if (studio) {

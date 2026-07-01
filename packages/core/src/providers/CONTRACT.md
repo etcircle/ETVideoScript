@@ -9,6 +9,9 @@ Provider support lives in `@etvideoscript/core/src/providers`. Adapters are deli
 - `engine.ts` — internal `runProvider` orchestration, settings/secret resolution, ledger rows, timeout/error mapping.
 - `localCommand.ts` — shared async local-exec helper for Local adapters that need binaries.
 - `tts/`, `stt/`, `studio-sound/`, `image-gen/`, `video-gen/`, `music-gen/` — same-kind adapter directories.
+  - `tts.mlx-chatterbox` / `studio-sound.deepfilternet` — local-tier HTTP adapters for the
+    self-hosted Mac Mini inference stack (see `docs/specs/local-inference-stack.md`); same
+    shape as `stt.homelab-whisper` below.
 - `generationTypes.ts` — shared generated-media input/output types (`Buffer` + MIME + optional duration).
 - `../network/guardedFetch.ts` — node-only `undici` fetch wrapper with DNS pinning, redirect validation, timeout, and SSRF checks.
 
@@ -69,7 +72,7 @@ Whisper no-word-timestamps is a domain decision: the provider call succeeded, so
 
 `enhanceAudio(workspacePath, input)` is the studio-sound public API. Inputs include `inputPath`, `op`, `clipSourceSha256`, `durationSec`, plus optional settings/env/test transport fields.
 
-Manifest/cache/render surfaces stay bare (`ffmpeg-local`, `adobe-enhance`, `elevenlabs-isolation`). The public function normalizes to full ids only at the engine boundary (`studio-sound.<name>`), checks `assets/enhanced/<cacheKey>.wav` before any provider call, discloses paid cost to stderr before paid calls, calls `runProvider({ kind: 'studio-sound' })`, then writes the returned `Buffer` to `assets/enhanced/<cacheKey>.wav`.
+Manifest/cache/render surfaces stay bare (`ffmpeg-local`, `adobe-enhance`, `elevenlabs-isolation`, `deepfilternet`). The public function normalizes to full ids only at the engine boundary (`studio-sound.<name>`), checks `assets/enhanced/<cacheKey>.wav` before any provider call, discloses paid cost to stderr before paid calls, calls `runProvider({ kind: 'studio-sound' })`, then writes the returned `Buffer` to `assets/enhanced/<cacheKey>.wav`.
 
 `materializeAudioEnhance` is a compatibility wrapper. It validates the requested output path stays inside the workspace and delegates to `enhanceAudio`.
 

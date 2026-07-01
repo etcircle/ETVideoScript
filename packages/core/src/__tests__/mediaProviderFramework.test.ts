@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readProviderRequests } from '../providerRequests';
@@ -18,6 +18,7 @@ afterEach(() => {
 function tempRoot() { return mkdtempSync(join(tmpdir(), 'etvs-provider-framework-')); }
 
 function sampleInputFor(id: string): any {
+  if (id === 'tts.mlx-chatterbox') return { text: 'hello', voice: 'default', language: 'en' };
   if (id.startsWith('tts.')) return { text: 'hello', voice: 'eve', language: 'en' };
   if (id === 'stt.mock') return { text: 'hello world', durationSec: 2 };
   if (id === 'stt.openai-whisper') return { audioPath: '/tmp/audio.wav', audioRel: 'media/extracted-audio.wav', durationSec: 60 };
@@ -42,15 +43,16 @@ function adapterConforms(adapter: MediaProvider<any, any>, id: string, kind: str
 describe('media provider framework', () => {
   it('registers media adapters that conform to id/kind/cost shape', () => {
     expect(listProviders().map((provider) => provider.id)).toEqual(expect.arrayContaining([
-      'tts.mock', 'tts.xai', 'tts.elevenlabs', 'tts.cartesia',
+      'tts.mock', 'tts.xai', 'tts.elevenlabs', 'tts.cartesia', 'tts.mlx-chatterbox',
       'stt.mock', 'stt.homelab-whisper', 'stt.openai-whisper', 'stt.elevenlabs', 'stt.cartesia',
-      'studio-sound.ffmpeg-local', 'studio-sound.adobe-enhance', 'studio-sound.elevenlabs-isolation',
+      'studio-sound.ffmpeg-local', 'studio-sound.adobe-enhance', 'studio-sound.elevenlabs-isolation', 'studio-sound.deepfilternet',
       'image-gen.mock', 'image-gen.xai', 'video-gen.mock', 'video-gen.xai', 'music-gen.mock', 'music-gen.elevenlabs'
     ]));
     adapterConforms(getProvider('tts.mock')!, 'tts.mock', 'tts');
     adapterConforms(getProvider('tts.xai')!, 'tts.xai', 'tts');
     adapterConforms(getProvider('tts.elevenlabs')!, 'tts.elevenlabs', 'tts');
     adapterConforms(getProvider('tts.cartesia')!, 'tts.cartesia', 'tts');
+    adapterConforms(getProvider('tts.mlx-chatterbox')!, 'tts.mlx-chatterbox', 'tts');
     adapterConforms(getProvider('stt.mock')!, 'stt.mock', 'stt');
     adapterConforms(getProvider('stt.homelab-whisper')!, 'stt.homelab-whisper', 'stt');
     adapterConforms(getProvider('stt.openai-whisper')!, 'stt.openai-whisper', 'stt');
@@ -59,6 +61,7 @@ describe('media provider framework', () => {
     adapterConforms(getProvider('studio-sound.ffmpeg-local')!, 'studio-sound.ffmpeg-local', 'studio-sound');
     adapterConforms(getProvider('studio-sound.adobe-enhance')!, 'studio-sound.adobe-enhance', 'studio-sound');
     adapterConforms(getProvider('studio-sound.elevenlabs-isolation')!, 'studio-sound.elevenlabs-isolation', 'studio-sound');
+    adapterConforms(getProvider('studio-sound.deepfilternet')!, 'studio-sound.deepfilternet', 'studio-sound');
     adapterConforms(getProvider('image-gen.mock')!, 'image-gen.mock', 'image-gen');
     adapterConforms(getProvider('image-gen.xai')!, 'image-gen.xai', 'image-gen');
     adapterConforms(getProvider('video-gen.mock')!, 'video-gen.mock', 'video-gen');
@@ -277,6 +280,39 @@ describe('media provider framework', () => {
       if (envelope.ok) expect((envelope.output as any).media.equals(audio)).toBe(true);
       expect(calls[0].headers['xi-api-key']).toBe('secret-eleven');
       expect(calls[0].headers.Authorization).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('runs MLX Chatterbox TTS over multipart HTTP and maps a failed response to ProviderExecutionError', async () => {
+    const provider = getProvider('tts.mlx-chatterbox')!;
+    const providerRecord = { schemaVersion: 1 as const, id: 'tts.mlx-chatterbox', kind: 'tts' as const, name: 'mlx-chatterbox', tier: 'local' as const, enabled: true, default: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const audio = Buffer.from('RIFF0000WAVEfmt ');
+    const okFetch = vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength) }) as any);
+    const output = await provider.run(sampleInputFor('tts.mlx-chatterbox'), { provider: providerRecord, requestId: 'provider_tts', signal: new AbortController().signal, secret: undefined, guardedFetch: okFetch } as any);
+    expect((output as any).audio.equals(audio)).toBe(true);
+    expect(okFetch).toHaveBeenCalledTimes(1);
+
+    const failedFetch = vi.fn(async () => ({ ok: false, status: 404, text: async () => 'voice not found' }) as any);
+    await expect(provider.run(sampleInputFor('tts.mlx-chatterbox'), { provider: providerRecord, requestId: 'provider_tts_fail', signal: new AbortController().signal, secret: undefined, guardedFetch: failedFetch } as any)).rejects.toThrow(/404/);
+  });
+
+  it('runs DeepFilterNet denoise over multipart HTTP and rejects undersized/failed responses', async () => {
+    const provider = getProvider('studio-sound.deepfilternet')!;
+    const providerRecord = { schemaVersion: 1 as const, id: 'studio-sound.deepfilternet', kind: 'studio-sound' as const, name: 'deepfilternet', tier: 'local' as const, enabled: true, default: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const root = tempRoot();
+    try {
+      const inputPath = join(root, 'noisy.wav');
+      writeFileSync(inputPath, Buffer.from('RIFF0000WAVEfmt '));
+      const cleanAudio = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(2000)]);
+      const okFetch = vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => cleanAudio.buffer.slice(cleanAudio.byteOffset, cleanAudio.byteOffset + cleanAudio.byteLength) }) as any);
+      const output = await provider.run({ inputPath, profile: 'podcast', filterChainVersion: 0, durationSec: 30 } as any, { provider: providerRecord, requestId: 'provider_denoise', signal: new AbortController().signal, secret: undefined, guardedFetch: okFetch } as any);
+      expect((output as any).audio.equals(cleanAudio)).toBe(true);
+
+      const tinyFetch = vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(4) }) as any);
+      await expect(provider.run({ inputPath, profile: 'podcast', filterChainVersion: 0, durationSec: 30 } as any, { provider: providerRecord, requestId: 'provider_denoise_tiny', signal: new AbortController().signal, secret: undefined, guardedFetch: tinyFetch } as any)).rejects.toThrow(/implausibly small/);
+
+      const failedFetch = vi.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }) as any);
+      await expect(provider.run({ inputPath, profile: 'podcast', filterChainVersion: 0, durationSec: 30 } as any, { provider: providerRecord, requestId: 'provider_denoise_fail', signal: new AbortController().signal, secret: undefined, guardedFetch: failedFetch } as any)).rejects.toThrow(/500/);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

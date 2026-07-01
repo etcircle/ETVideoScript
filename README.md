@@ -115,6 +115,22 @@ http://127.0.0.1:8789/v1/audio/transcriptions
 
 This is the OpenAI-compatible `/v1/audio/transcriptions` shape, pointed at WhisperX (transformers Whisper-large-v3-turbo + wav2vec2 forced alignment) in the canonical homelab deployment. Returns `segments[].words[]` with `start`/`end`/`probability` per word — ~30ms word-boundary accuracy on EN, no leading-silence drift.
 
+## Homelab TTS (voice cloning) and denoise
+
+Two more local-tier adapters point at the same Mac Mini inference stack: `tts.mlx-chatterbox`
+(Chatterbox voice cloning via `mlx-audio`) and `studio-sound.deepfilternet` (DeepFilterNet3
+denoise). Both default to `127.0.0.1` and can be pointed at a Tailscale address via env:
+
+```text
+ETVS_CHATTERBOX_BASE_URL=http://127.0.0.1:8791/v1/tts
+ETVS_DEEPFILTERNET_BASE_URL=http://127.0.0.1:8792/v1/enhance
+```
+
+`ETVIDEO_CHATTERBOX_BASE_URL` / `ETVIDEO_DEEPFILTERNET_BASE_URL` are supported as legacy aliases.
+`*_BASIC_AUTH` variants (`ETVS_CHATTERBOX_BASIC_AUTH`, `ETVS_DEEPFILTERNET_BASIC_AUTH`, and their
+`ETVIDEO_*` aliases) carry a raw `Authorization` header value — see
+`docs/specs/local-inference-stack.md` for the bearer-token convention used by all three servers.
+
 ## Safety rules
 
 - `temp/` and local `workspaces/*` are gitignored.

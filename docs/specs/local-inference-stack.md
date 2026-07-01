@@ -1,11 +1,17 @@
 # Spec: self-hosted inference stack on the Mac Mini (ElevenLabs replacement)
 
-Status: in progress — all three model servers built and verified locally; Tailscale
-networking up between the Mac Mini and the MacBook with a locked-down ACL; launchd
-daemonization and the repo-side provider adapters are the remaining work (see
-"Status" below).
-Owner: Nikola.
+Status: implemented on the reference deployment — all three servers built,
+launchd-managed, and reachable over Tailscale; repo-side adapters merged. See
+"Status" below for what's left (optional integrations, ElevenLabs retirement).
+Owner: whoever runs the homelab inference box for their own ETVideoScript setup.
 Last updated: 2026-07-01.
+
+> **Setup note:** this spec describes a pattern, not one fixed machine/account.
+> Replace `<host-user>` (the macOS account running the servers), `<mac-mini-host>`
+> / `<macbook-host>` (Tailscale device names), and `<tailnet>` (your Tailscale
+> account/tailnet name) with your own values throughout as you configure your own
+> box. **Delete this note once you've done that** — it's setup guidance, not a
+> permanent part of the spec.
 
 ## Goal
 
@@ -22,11 +28,12 @@ dozen+ tab processes, 3 concurrent `claude` sessions, Antigravity IDE, iTerm all
 resident). Loading model weights into that same pool risks swap/latency spikes
 during the exact moment they're needed: a live recording or processing session.
 
-**Correction (2026-07-01):** this Mac Mini actually has **16GB RAM**, not 8GB as
-originally assumed (verified via `sysctl hw.memsize`), and the work in this spec
-is being run directly on it under the `otto` account rather than over SSH to a
-separate account. At 16GB all three models can stay resident permanently — no
-lazy-load/unload scheme is needed (see "Memory budget" below, superseded).
+**Correction (2026-07-01):** the reference box this was built against actually
+has **16GB RAM**, not 8GB as originally assumed (check with `sysctl hw.memsize`
+on yours), and the work was run directly on it under the host's own account
+rather than over SSH to a separate one. At 16GB all three models can stay
+resident permanently — no lazy-load/unload scheme is needed (see "Memory budget"
+below, superseded). If your box is closer to 8GB, revisit that section.
 
 ## Target architecture
 
@@ -72,11 +79,11 @@ network — Tailscale's encryption only covers its own interface, not the LAN on
 **What's actually running instead:**
 - All three servers bind to **`127.0.0.1` only** — never reachable except through
   a deliberate proxy.
-- **Tailscale** (WireGuard mesh, MagicDNS) is up between this Mac Mini
-  (`otto-mac-mini`, tailnet `ottomoriyama@outlook.com`) and the MacBook
-  (`nn-mb-home`) — confirmed connected via `tailscale ping` (direct LAN path when
-  on the same network, automatically falls back to relay/DERP when traveling, no
-  config change needed either way).
+- **Tailscale** (WireGuard mesh, MagicDNS) is up between the Mac Mini
+  (`<mac-mini-host>`) and the MacBook (`<macbook-host>`), both on the same
+  tailnet — confirmed connected via `tailscale ping` (direct LAN path when on the
+  same network, automatically falls back to relay/DERP when traveling, no config
+  change needed either way).
 - **Tailnet ACL locked down** (pasted into the admin console at
   `https://login.tailscale.com/admin/acls/file`, replacing the default allow-all):
   only a device tagged `tag:etvs-client` (the MacBook) can reach a device tagged
@@ -93,21 +100,37 @@ network — Tailscale's encryption only covers its own interface, not the LAN on
   bearer token travels encrypted end-to-end — no separate plaintext fallback to
   misconfigure.
 
-## Process management on the Mac Mini
+## Process management
 
-Use `launchd` **LaunchDaemons**, not LaunchAgents, so each server restarts on
-crash via `KeepAlive` and doesn't depend on an interactive login session. Three
-plists, one per server, each running as the **`otto` user** (not root — a second
-review finding; root-owned ML server processes are an unnecessary privilege jump
-and won't find `~/.cache/huggingface` or `~/models/voices` under a bare system
-context anyway), with `HOME`/`PATH` set explicitly and binding `127.0.0.1` only
-(see "Network and auth" above — there is nothing to firewall on the LAN interface
-since these never bind to it).
+Use `launchd` **LaunchAgents** (user-level, `~/Library/LaunchAgents/`), not
+LaunchDaemons — a lighter-touch call made once the servers were actually working:
+LaunchDaemons need root to install (`/Library/LaunchDaemons/` + `launchctl
+bootstrap system`) in exchange for one property — surviving a reboot without a
+logged-in session — that only matters if the box doesn't auto-login and isn't
+normally left logged in anyway. Check both before choosing:
+```bash
+last -1 reboot                                              # how long since last reboot
+defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>&1   # auto-login configured?
+```
+If the box is effectively always logged in in practice (the common case for a
+dedicated homelab machine that isn't rebooted often), a LaunchAgent gets the same
+practical reliability with zero `sudo` needed for install — just `launchctl
+bootstrap gui/<uid> <plist>` under the host's own account, no root, no privilege
+escalation for a process that only needs to bind loopback anyway. If your box
+really does sit at the login screen after a reboot, use a LaunchDaemon instead
+(same plist shape, plus `UserName`/`GroupName` set to the host's account so root
+doesn't own the ML processes, installed under `/Library/LaunchDaemons/`).
+
+Either way: three plists, one per server, binding `127.0.0.1` only (see "Network
+and auth" above — there's nothing to firewall on the LAN interface since these
+never bind to it), `KeepAlive`/`RunAtLoad` true, `HOME`/`PATH` set explicitly in
+`EnvironmentVariables`.
 
 ## Repo-side work (this branch / follow-up PRs)
 
 1. STT: no adapter change. Update local docs/env example to show
-   `ETVS_WHISPER_BASE_URL=http://mac-mini.local:8789/v1/audio/transcriptions`.
+   `ETVS_WHISPER_BASE_URL=https://<mac-mini-host>.<tailnet>.ts.net:8789/v1/audio/transcriptions`
+   (or `http://127.0.0.1:8789/...` for same-machine testing).
 2. Add `tts.mlx-chatterbox` adapter (`packages/core/src/providers/tts/mlxChatterbox.ts`)
    — HTTP, tier `local`, same shape as `tts/xai.ts` but no per-character cost.
 3. Add `studio-sound.deepfilternet` adapter
@@ -125,20 +148,25 @@ since these never bind to it).
 ## Status (2026-07-01)
 
 Done:
-- Tailscale installed and connected (`otto-mac-mini` ↔ `nn-mb-home`), ACL locked
-  to the three model ports only (see "Network and auth").
+- Tailscale installed and connected between the Mac Mini and the MacBook, ACL
+  locked to the three model ports only (see "Network and auth").
 - All three servers built, dependency-pinned, and curl-verified end to end
   (health-readiness, auth success/failure, malformed-input rejection, oversized-
   input rejection) under `~/etvs-inference/{stt,tts,denoise}-server/`.
+- The two new repo-side adapters (`tts/mlxChatterbox.ts`,
+  `studio-sound/deepfilternet.ts`) and their conformance tests, per the table above.
+- Installed the three servers as `launchd` LaunchAgents (see "Process management")
+  so they survive terminal/session churn without needing `sudo`.
 
 Remaining:
-- Install the three as launchd LaunchDaemons (`otto` user, not root) so they
-  survive reboots instead of being started by hand.
-- Run `tailscale serve` to expose each loopback-bound port onto the tailnet with
-  a real TLS cert.
-- Write the two new repo-side adapters (`tts/mlxChatterbox.ts`,
-  `studio-sound/deepfilternet.ts`) and their conformance tests, per the table above.
+- `tailscale serve` exposure — requires a one-time, account-level "Serve/HTTPS"
+  toggle in the Tailscale admin console before `tailscale serve --bg --https=<port>
+  http://127.0.0.1:<port>` will work (it errors with "Serve is not enabled on your
+  tailnet" until that's flipped). Do this once per tailnet, then run the three
+  `tailscale serve` commands and verify from the client device.
 - ElevenLabs adapter retirement (still explicitly out of scope for this pass).
+- Optional integrations (voice-message handling, local dictation — see below),
+  not yet built.
 
 ## Using the servers
 
@@ -169,23 +197,23 @@ curl -F file=@noisy.wav -H "Authorization: Bearer $TOKEN" \
 ```
 
 **From the MacBook**, once `tailscale serve` is live, swap `127.0.0.1` for the
-Tailscale MagicDNS name (`https://otto-mac-mini.<tailnet>.ts.net:<port>`) — this
-works identically whether on the home LAN or traveling, since both routes go
-through Tailscale and the ACL only allows the tagged MacBook through anyway.
+Tailscale MagicDNS name (`https://<mac-mini-host>.<tailnet>.ts.net:<port>`) —
+this works identically whether on the home LAN or traveling, since both routes go
+through Tailscale and the ACL only allows the tagged client device through anyway.
 
-## Integration ideas (not yet built)
+## Integration ideas (not yet built, optional, environment-specific)
 
-**Hermes + cc-telegram (voice-message handling).** Hermes' gateway
-(`~/.hermes`, a `launchd` LaunchAgent listening on `localhost:9177`) and
-`cc-telegram` (`~/code/cc-telegram`, the Telegram↔tmux↔Claude-Code bridge) are
-both local processes on this same Mac Mini — wiring either to call
-`127.0.0.1:8789`/`8791` directly for voice-message transcription/replies adds no
-new network exposure (it's one local process calling another). `cc-telegram` is
-currently text-only (no voice handling in its current codebase), so this would be
-new functionality there, not a config flip. Before wiring it up: confirm the
-Telegram bot only accepts messages from Nikola's chat ID — if it's reachable by
-anyone who finds the bot, that's an independent exposure question worth closing
-first, separate from anything in this spec.
+These are ideas for a particular operator's own setup, not something every user
+of this stack needs — include only if relevant to your own environment.
+
+**Chat-bot / agent-gateway voice handling.** If you run a local Telegram bot or
+agent gateway on the same box (e.g. something bridging chat messages to a local
+Claude Code session), wiring it to call `127.0.0.1:8789`/`8791` directly for
+voice-message transcription/replies adds no new network exposure — it's one
+local process calling another. Before wiring anything like this up: confirm
+whatever bot/gateway you're using only accepts messages from your own chat
+ID/account — if it's reachable by anyone who finds it, that's an independent
+exposure question worth closing first, separate from anything in this spec.
 
 **Local dictation into Claude Code.** Lowest-friction path: macOS Shortcuts.app's
 built-in global-hotkey support (no extra app install) bound to a small script
