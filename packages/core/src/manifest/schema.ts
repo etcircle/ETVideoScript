@@ -38,10 +38,46 @@ export const StudioCleanupSchema = z.object({
   /** ISO timestamp of when this record was created. */
   createdAt: z.string().datetime(),
   /** Estimated USD cost of the isolation call. */
-  costUsd: z.number().nonnegative().optional()
+  costUsd: z.number().nonnegative().optional(),
+  /**
+   * Value fingerprint (channelFixFingerprint of input/source.mp4's audioChannelFix) of
+   * the channel-mix state the SOURCE AUDIO was in when this cleanup was generated.
+   * buildRenderPlan compares this against the CURRENT fingerprint to detect staleness —
+   * a value comparison, not appliedAt/createdAt timestamp ordering, so it can't be fooled
+   * by a same-value re-apply churning a timestamp or a same-millisecond race. Optional
+   * for back-compat: a record from before this field existed is treated as stale only
+   * when an audioChannelFix record actually exists (see render/plan.ts).
+   */
+  audioChannelFixFingerprint: z.string().optional()
 });
 
 export type StudioCleanup = z.infer<typeof StudioCleanupSchema>;
+
+/**
+ * Project-level single-channel-mic fix. Some recordings land the mic on only
+ * one stereo channel (speech on L or R, silence on the other). A top-level
+ * FIELD (not an OperationKind) for the same reason as studioCleanup: it is a
+ * property of the whole recording, not of a clip span.
+ *
+ * When status is 'approved':
+ *   - extraction reads ONLY the live channel (pan=mono) instead of -ac 1
+ *     averaging the dead channel in,
+ *   - buildRenderPlan sets audioSourceChannel so the pipeline duplicates the
+ *     live channel to both L and R (pan=stereo).
+ * Set status to 'disabled' to revert without losing the record.
+ */
+export const AudioChannelFixSchema = z.object({
+  /** 'approved' → extraction + render use sourceChannel. 'disabled' → inert, record retained. */
+  status: z.enum(['approved', 'disabled']),
+  /** Which input channel carries the real audio. */
+  sourceChannel: z.enum(['left', 'right']),
+  /** Measured per-channel RMS at decision time; auto=false means the user forced the channel. */
+  detection: z.object({ leftRmsDb: z.number(), rightRmsDb: z.number(), auto: z.boolean() }),
+  /** ISO timestamp of when this record was created OR last changed (apply, re-apply, disable). */
+  appliedAt: z.string().datetime()
+});
+
+export type AudioChannelFix = z.infer<typeof AudioChannelFixSchema>;
 
 export const ManifestV3Schema = z.object({
   manifestVersion: z.literal(3),
@@ -55,7 +91,9 @@ export const ManifestV3Schema = z.object({
   renderPresets: RenderPresetsSchema,
   brandPackId: z.string().min(1).optional(),
   /** Optional project-level studio-sound cleanup. Absent = no cleanup applied. */
-  studioCleanup: StudioCleanupSchema.optional()
+  studioCleanup: StudioCleanupSchema.optional(),
+  /** Optional project-level single-channel-mic fix. Absent = stereo source untouched. */
+  audioChannelFix: AudioChannelFixSchema.optional()
 });
 
 export type ManifestV3 = z.infer<typeof ManifestV3Schema>;

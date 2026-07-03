@@ -471,6 +471,7 @@ export function createApp(config: ApiConfig = loadConfig()) {
       appendJobStatus(ws, { jobId, projectId, type, status: 'running', createdAt, startedAt: new Date().toISOString(), input: { ...body }, ...(stages ? { stages } : {}) });
       try {
         let outputs: string[] = [];
+        let warning: string | undefined;
         if (type === 'extract-audio') {
           const audioOutputs = await extractAllClipAudio(ws, { overwrite: Boolean(body.overwrite), logJob: false });
           outputs = audioOutputs.flatMap((output) => output.endsWith('.wav') ? [output, output.replace(/extracted-audio\.wav$/, 'peaks.json')] : [output]);
@@ -505,6 +506,9 @@ export function createApp(config: ApiConfig = loadConfig()) {
           outputs = [String(await withProjectManifestMutex(projectId, async () => {
             const manifest = loadManifestV3(ws);
             const fingerprint = manifestFingerprint(ws, manifest.updatedAt);
+            if (buildRenderPlanV3(manifest).studioCleanupStale) {
+              warning = 'Studio cleanup predates the current channel-fix decision; rendered with raw (re-panned) audio instead of the cleaned asset. Re-run studio cleanup (paid) to restore noise removal for the corrected channel.';
+            }
             const result = await renderDraft(ws, { preset: 'draft', overwrite: true, onProgress: (event: any) => {
               if (cancelledJobs.has(jobId)) throw new Error('Render cancelled by user');
               const percent = Math.round(event.percent);
@@ -539,7 +543,7 @@ export function createApp(config: ApiConfig = loadConfig()) {
         }
         else if (type === 'export-captions') outputs = [exportCaptions(ws, { format: body.format === 'vtt' ? 'vtt' : 'srt' })];
         if (cancelledJobs.has(jobId)) appendJobStatus(ws, { jobId, projectId, type, status: 'cancelled', createdAt, completedAt: new Date().toISOString(), ...(stages ? { stages: updateStage(stages, 'render', { status: 'cancelled', completedAt: new Date().toISOString() }) } : {}) });
-        else appendJobStatus(ws, { jobId, projectId, type, status: 'succeeded', createdAt, completedAt: new Date().toISOString(), outputs, ...(stages ? { stages: updateStage(stages, 'render', { status: 'succeeded', completedAt: new Date().toISOString(), percent: 100 }) } : {}) });
+        else appendJobStatus(ws, { jobId, projectId, type, status: 'succeeded', createdAt, completedAt: new Date().toISOString(), outputs, ...(warning ? { warning } : {}), ...(stages ? { stages: updateStage(stages, 'render', { status: 'succeeded', completedAt: new Date().toISOString(), percent: 100 }) } : {}) });
       } catch (err) {
         const cancelled = cancelledJobs.has(jobId) || errorMessage(err).toLowerCase().includes('cancelled');
         appendJobStatus(ws, { jobId, projectId, type, status: cancelled ? 'cancelled' : 'failed', createdAt, completedAt: new Date().toISOString(), error: cancelled ? undefined : errorMessage(err), ...(stages ? { stages: updateStage(stages, 'render', { status: cancelled ? 'cancelled' : 'failed', completedAt: new Date().toISOString(), error: cancelled ? undefined : errorMessage(err) }) } : {}) });

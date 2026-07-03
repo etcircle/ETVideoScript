@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { addAsset } from '../assets/operations';
@@ -8,6 +8,9 @@ import { assertInside, relativeToWorkspace } from '../filesystem';
 import { loadManifestV3, saveManifestV3 } from '../manifest/io';
 import type { ManifestV3 } from '../manifest/schema';
 import { validateManifestV3Document } from '../manifest/validate';
+import { probeRecordingMedia } from '../ffprobe';
+import { resolveChannelFixForAsset } from '../channelFixScope';
+import { channelFixSidecarFresh, writeChannelFixSidecar } from '../channelFixSidecar';
 import type { Clip, Track } from './schema';
 
 function validateNext(manifest: ManifestV3): ManifestV3 {
@@ -172,26 +175,58 @@ export function extractAudioAssetInWorkspace(workspacePath: string, manifest: Ma
   const sourceAsset = manifest.assets.find((asset) => asset.assetId === input.sourceAssetId);
   if (!sourceAsset) throw new Error(`Source asset not found: ${input.sourceAssetId}`);
   if (sourceAsset.kind !== 'video') throw new Error(`Cannot extract audio from non-video asset: ${input.sourceAssetId}`);
-  const existing = extractedAssetFor(manifest, sourceAsset);
-  if (existing) return { manifest, asset: existing };
 
   const workspace = resolve(workspacePath);
-  const assetId = `asset_audio_${sourceAsset.assetId}`;
   const relativePath = `assets/audio/${sourceAsset.assetId}.wav`;
   const outputPath = assertInside(workspace, relativePath);
   const sourcePath = assertInside(workspace, sourceAsset.path);
+  if (!existsSync(sourcePath)) throw new Error(`${sourceAsset.path} not found; run etvideo import first`);
+  // Scoped to the source asset (issue #4) — the base recording's fix must not silently
+  // pan an unrelated video asset's detached audio.
+  const sourceChannel = resolveChannelFixForAsset(manifest, sourceAsset.path);
+  const existing = extractedAssetFor(manifest, sourceAsset);
+  // Reuse requires the fingerprint sidecar to match the CURRENT fix state AND be at
+  // least as new as the source (issue #2/#5) — a detach done before the fix was
+  // applied (or before a source replace) must not stay stale forever.
+  if (existing && channelFixSidecarFresh(outputPath, sourceChannel, sourcePath)) return { manifest, asset: existing };
+
   mkdirSync(join(workspace, 'assets/audio'), { recursive: true });
   const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
-  const result = spawnSync(ffmpeg, ['-y', '-i', sourcePath, '-vn', '-acodec', 'pcm_s16le', '-ar', '48000', '-ac', '2', outputPath], { encoding: 'utf8' });
+  // Live-probe (not manifest metadata) so a mono/5.1 source can never get a pan referencing
+  // a missing/extra channel (issue #7). Only probed when a fix is actually in scope here —
+  // extraction with no fix must not require a real, ffprobe-readable source file.
+  const channels = sourceChannel ? (probeRecordingMedia(sourcePath).audio?.channels ?? 0) : 0;
+  const panArgs = sourceChannel && channels === 2
+    ? ['-af', `pan=stereo|c0=${sourceChannel === 'left' ? 'c0' : 'c1'}|c1=${sourceChannel === 'left' ? 'c0' : 'c1'}`]
+    : [];
+  const result = spawnSync(ffmpeg, ['-y', '-i', sourcePath, '-vn', ...panArgs, '-acodec', 'pcm_s16le', '-ar', '48000', '-ac', '2', outputPath], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`ffmpeg audio extraction failed: ${result.stderr || result.error?.message || 'unknown error'}`);
-  const asset: Asset = { assetId, kind: 'audio', path: relativeToWorkspace(workspace, outputPath), durationSec: sourceAsset.durationSec, provenance: 'imported', audio: { sampleRate: 48000, channels: 2, codec: 'pcm_s16le' } };
+  writeChannelFixSidecar(outputPath, sourceChannel);
+  if (existing) return { manifest, asset: existing };
+  const asset: Asset = { assetId: `asset_audio_${sourceAsset.assetId}`, kind: 'audio', path: relativeToWorkspace(workspace, outputPath), durationSec: sourceAsset.durationSec, provenance: 'imported', audio: { sampleRate: 48000, channels: 2, codec: 'pcm_s16le' } };
   return addAsset(manifest, asset);
 }
 
-export function detachAudioInWorkspace(workspacePath: string, input: { clipId: string; detachedClipId?: string }): { manifest: ManifestV3; videoClip: Clip; audioClip: Clip; audioTrack: Track; asset: Asset } {
+/**
+ * `refresh: true` (default false, preserving the pre-existing throw below) lets an
+ * ALREADY-detached clip revisit its underlying bytes: extractAudioAssetInWorkspace's
+ * freshness check (above) re-extracts assets/audio/<assetId>.wav in place if it's
+ * stale relative to the current audioChannelFix state, and this function then just
+ * resolves the existing companion audio clip/track instead of throwing (issue #4).
+ * No manifest write is needed on that path — only file bytes on disk changed, the
+ * clip/track/asset records are untouched (detachAudio never runs twice).
+ */
+export function detachAudioInWorkspace(workspacePath: string, input: { clipId: string; detachedClipId?: string; refresh?: boolean }): { manifest: ManifestV3; videoClip: Clip; audioClip: Clip; audioTrack: Track; asset: Asset } {
   const manifest = loadManifestV3(workspacePath);
   const { clip } = findClipEntry(manifest, input.clipId);
   const extracted = extractAudioAssetInWorkspace(workspacePath, manifest, { sourceAssetId: clip.assetId });
+  if (clip.audioDetached) {
+    if (!input.refresh) throw new Error(`Clip audio already detached: ${input.clipId}`);
+    const audioClip = extracted.manifest.tracks.flatMap((track) => track.clips).find((candidate) => candidate.detachedFrom === clip.clipId);
+    const audioTrack = extracted.manifest.tracks.find((track) => track.clips.some((candidate) => candidate.clipId === audioClip?.clipId));
+    if (!audioClip || !audioTrack) throw new Error(`Clip ${input.clipId} is marked detached but its companion audio clip is missing`);
+    return { manifest: extracted.manifest, videoClip: clip, audioClip, audioTrack, asset: extracted.asset };
+  }
   const detached = detachAudio(extracted.manifest, { clipId: input.clipId, assetId: extracted.asset.assetId, detachedClipId: input.detachedClipId });
   saveManifestV3(workspacePath, detached.manifest, { revision: true });
   return { ...detached, asset: extracted.asset };

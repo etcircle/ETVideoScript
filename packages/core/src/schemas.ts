@@ -270,7 +270,9 @@ export const JobRecordSchema = z.object({
   stages: z.array(JobStageSchema).optional(),
   outputs: z.array(z.string()).optional(),
   error: z.string().optional(),
-  log: z.string().optional()
+  log: z.string().optional(),
+  /** Non-fatal advisory surfaced alongside a succeeded job, e.g. a render that fell back off a stale studioCleanup. */
+  warning: z.string().optional()
 });
 
 export const ProviderRequestIdSchema = z.string().min(8).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/);

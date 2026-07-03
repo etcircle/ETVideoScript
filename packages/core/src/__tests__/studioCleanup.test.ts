@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ManifestV3Schema, StudioCleanupSchema, buildRenderPlanV3 } from '../index';
+import { ManifestV3Schema, StudioCleanupSchema, buildRenderPlanV3, channelFixFingerprint } from '../index';
 
 const now = '2026-06-08T00:00:00.000Z';
 const presets = { draft: { resolution: '1280x720', videoBitrate: '2500k', audioBitrate: '128k' }, youtube: { resolution: '1920x1080', videoBitrate: '6000k', audioBitrate: '192k' } };
@@ -150,6 +150,103 @@ describe('buildRenderPlan studioCleanupAudioPath', () => {
 
     const disabledManifest = ManifestV3Schema.parse({ ...approvedManifest, studioCleanup: { ...approvedManifest.studioCleanup!, status: 'disabled' } });
     expect(buildRenderPlanV3(disabledManifest).studioCleanupAudioPath).toBeUndefined();
+  });
+});
+
+// Issue #3/#9/#11: an approved studioCleanup was previously invalidated by comparing
+// audioChannelFix.appliedAt against studioCleanup.createdAt with plain Date.parse
+// ordering — defeated by a same-value re-apply/re-disable churning appliedAt with no
+// real value change, same-millisecond races, and future-dated hand edits. Replaced with
+// a VALUE fingerprint recorded on the cleanup at creation time (studioCleanupRoutes.ts)
+// and compared against the CURRENT fix fingerprint here — immune to all three.
+describe('buildRenderPlan studioCleanupStale (fingerprint-based)', () => {
+  const createdAt = '2026-06-08T00:00:00.000Z';
+  const cleanupWithFingerprint = (audioChannelFixFingerprint?: string) => ({
+    status: 'approved' as const, assetPath: 'assets/studio-clean/abc.wav', cacheKey: 'abc', provider: 'studio-sound.elevenlabs-isolation', createdAt, ...(audioChannelFixFingerprint !== undefined ? { audioChannelFixFingerprint } : {})
+  });
+  const fixture = (audioChannelFix: unknown, cleanup: ReturnType<typeof cleanupWithFingerprint>) => baseManifest({
+    assets: [{ assetId: 'asset_video_001', kind: 'video' as const, path: 'input/source.mp4', durationSec: 10, provenance: 'imported' as const, video: { width: 1280, height: 720, fps: 30 }, audio: { sampleRate: 48000, channels: 2 } }],
+    studioCleanup: cleanup,
+    audioChannelFix
+  });
+  const approvedLeft = { status: 'approved' as const, sourceChannel: 'left' as const, detection: { leftRmsDb: -18, rightRmsDb: -92, auto: true }, appliedAt: createdAt };
+  const disabledLeft = { ...approvedLeft, status: 'disabled' as const };
+
+  it('is absent (not stale) when the cleanup fingerprint matches the current fix state', () => {
+    const manifest = ManifestV3Schema.parse(fixture(approvedLeft, cleanupWithFingerprint(channelFixFingerprint('left'))));
+    const plan = buildRenderPlanV3(manifest);
+    expect(plan.studioCleanupStale).toBeUndefined();
+    expect(plan.studioCleanupAudioPath).toBe('assets/studio-clean/abc.wav');
+  });
+
+  it('is stale (falls back to raw re-panned audio) when a fix APPLY changed the fingerprint after the cleanup was generated (dispute point 1)', () => {
+    // Cleanup was fingerprinted for 'none' (no fix yet); the fix is now approved 'left'.
+    const manifest = ManifestV3Schema.parse(fixture(approvedLeft, cleanupWithFingerprint(channelFixFingerprint(undefined))));
+    const plan = buildRenderPlanV3(manifest);
+    expect(plan.studioCleanupStale).toBe(true);
+    expect(plan.studioCleanupAudioPath).toBeUndefined();
+    expect(plan.audioSourceChannel).toBe('left'); // raw audio is still correctly re-panned
+  });
+
+  it('is stale when a fix DISABLE changed the fingerprint after the cleanup was generated, so disabling has a visible effect on the render (dispute point 2)', () => {
+    // Cleanup was fingerprinted for the approved 'left' fix; it has since been disabled.
+    const manifest = ManifestV3Schema.parse(fixture(disabledLeft, cleanupWithFingerprint(channelFixFingerprint('left'))));
+    const plan = buildRenderPlanV3(manifest);
+    expect(plan.studioCleanupStale).toBe(true);
+    expect(plan.studioCleanupAudioPath).toBeUndefined();
+    expect(plan.audioSourceChannel).toBeUndefined(); // fix disabled: raw audio, unpanned
+  });
+
+  it('is stale when the fingerprint field is missing on the cleanup AND a fix record exists (legacy cleanup, pre-fingerprint field)', () => {
+    const manifest = ManifestV3Schema.parse(fixture(approvedLeft, cleanupWithFingerprint(undefined)));
+    const plan = buildRenderPlanV3(manifest);
+    expect(plan.studioCleanupStale).toBe(true);
+    expect(plan.studioCleanupAudioPath).toBeUndefined();
+  });
+
+  it('never auto-reruns the paid cleanup — staleness only ever suppresses the cached asset', () => {
+    const approvedRight = { status: 'approved' as const, sourceChannel: 'right' as const, detection: { leftRmsDb: -92, rightRmsDb: -18, auto: true }, appliedAt: createdAt };
+    const manifest = ManifestV3Schema.parse(fixture(approvedRight, cleanupWithFingerprint(channelFixFingerprint('left'))));
+    const plan = buildRenderPlanV3(manifest);
+    // No paid-provider fields anywhere on the plan; studioCleanup itself is untouched
+    // (still 'approved' on the source manifest) — only the render's USE of it is suppressed.
+    expect(manifest.studioCleanup?.status).toBe('approved');
+    expect(plan.studioCleanupAudioPath).toBeUndefined();
+  });
+
+  it('is absent when there is no channel fix at all, regardless of the cleanup\'s recorded fingerprint (or lack thereof)', () => {
+    expect(buildRenderPlanV3(ManifestV3Schema.parse(fixture(undefined, cleanupWithFingerprint(channelFixFingerprint(undefined))))).studioCleanupStale).toBeUndefined();
+    // A legacy cleanup with NO fingerprint field at all, and no channel-fix history ever —
+    // the common case, and every manifest that predates this whole feature — must not be
+    // treated as stale just because the new field happens to be absent.
+    expect(buildRenderPlanV3(ManifestV3Schema.parse(fixture(undefined, cleanupWithFingerprint(undefined)))).studioCleanupStale).toBeUndefined();
+  });
+
+  it('is a true no-op-immune comparison: identical fingerprints stay fresh regardless of appliedAt/createdAt ordering', () => {
+    // appliedAt is LATER than createdAt (the old, now-abandoned timestamp-ordering check
+    // would have called this stale) but the fingerprint matches — must NOT be stale.
+    const laterAppliedFix = { ...approvedLeft, appliedAt: '2026-06-08T05:00:00.000Z' };
+    const manifest = ManifestV3Schema.parse(fixture(laterAppliedFix, cleanupWithFingerprint(channelFixFingerprint('left'))));
+    expect(buildRenderPlanV3(manifest).studioCleanupStale).toBeUndefined();
+  });
+});
+
+// Issue #5: studioCleanup describes ONLY input/source.mp4's audio.
+describe('buildRenderPlan studioCleanupAudioPath scope guard', () => {
+  it('is absent when the single remaining video source is NOT input/source.mp4 (base clip removed, unrelated asset remains)', () => {
+    const manifest = ManifestV3Schema.parse({
+      manifestVersion: 3 as const,
+      projectId: 'studio-clean-scope-test',
+      createdAt: now,
+      updatedAt: now,
+      assets: [{ assetId: 'asset_video_other', kind: 'video' as const, path: 'assets/video/other.mp4', durationSec: 10, provenance: 'imported' as const, video: { width: 1280, height: 720, fps: 30 }, audio: { sampleRate: 48000 } }],
+      tracks: [{ trackId: 'track_video_001', kind: 'video' as const, name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_001', assetId: 'asset_video_other', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] }],
+      operations: [],
+      outputs: [{ outputId: 'out_001', kind: 'full' as const, aspects: ['16:9' as const], status: 'manual' as const }],
+      renderPresets: presets,
+      studioCleanup: { status: 'approved' as const, assetPath: 'assets/studio-clean/abc.wav', cacheKey: 'abc', provider: 'studio-sound.elevenlabs-isolation', createdAt: now }
+    });
+    expect(buildRenderPlanV3(manifest).studioCleanupAudioPath).toBeUndefined();
   });
 });
 

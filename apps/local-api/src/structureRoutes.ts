@@ -133,11 +133,11 @@ export function registerStructureRoutes(ctx: LocalApiRouteContext) {
     catch (err) { return routeError(reply, err); }
   });
 
-  app.post<{ Params: { projectId: string; clipId: string }; Body: { detachedClipId?: string } }>('/api/projects/:projectId/clips/:clipId/detach-audio', async (req, reply) => {
+  app.post<{ Params: { projectId: string; clipId: string }; Body: { detachedClipId?: string; refresh?: boolean } }>('/api/projects/:projectId/clips/:clipId/detach-audio', async (req, reply) => {
     try {
       const ws = ctx.workspace(req.params.projectId);
       return await ctx.withProjectManifestMutex(req.params.projectId, async () => {
-        const result = detachAudioInWorkspaceV3(ws, { clipId: req.params.clipId, detachedClipId: req.body?.detachedClipId });
+        const result = detachAudioInWorkspaceV3(ws, { clipId: req.params.clipId, detachedClipId: req.body?.detachedClipId, refresh: req.body?.refresh });
         return response(ctx, ws, { videoClip: result.videoClip, audioClip: result.audioClip, audioTrack: result.audioTrack, asset: result.asset });
       });
     } catch (err) { return routeError(reply, err); }
