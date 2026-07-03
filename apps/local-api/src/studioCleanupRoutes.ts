@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertInside, estimateAudioEnhanceCostUsd, ffprobeDurationSec, readSecrets } from '@etvideoscript/core';
+import { assertInside, channelFixFingerprint, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, readSecrets, resolveChannelFixForAsset } from '@etvideoscript/core';
 import type { LocalApiRouteContext } from './routeContext';
 
 /**
@@ -98,31 +98,58 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
       }
 
       const sourceAudioAbs = assertInside(ws, primaryAudio);
-      const durationSec = (() => {
-        try { return ffprobeDurationSec(sourceAudioAbs); }
-        catch { return 0; }
-      })();
-      const costUsd = estimateAudioEnhanceCostUsd('elevenlabs-isolation', durationSec);
-      const costDisclosure = `ElevenLabs Voice Isolator — ~$${costUsd.toFixed(2)} for ${Math.round(durationSec)}s of audio`;
 
       // Content-hash cache check (inside the manifest mutex so the cache check +
       // asset write + manifest update are atomic with respect to other mutations).
       return ctx.withProjectManifestMutex(projectId, async () => {
+        // Refresh the source audio in place FIRST if it's stale relative to the current
+        // channel-fix state (issue #3) — otherwise this hashes (and potentially pays for
+        // cleaning) bytes mixed for a fix state that's no longer current. extractAudio/
+        // extractClipAudio are self-freshening (channelFixSidecarFresh) and cheap/local/
+        // non-paid, so this is always safe to run before every studio-cleanup call.
+        const clipAudioMatch = /^media\/([^/]+)\/extracted-audio\.wav$/.exec(primaryAudio);
+        if (primaryAudio === 'media/extracted-audio.wav') {
+          await extractAudio(ws, { overwrite: false, logJob: false });
+        } else if (clipAudioMatch) {
+          await extractClipAudio(ws, clipAudioMatch[1]!, { overwrite: false, logJob: false });
+        }
+
+        // Duration/cost must be probed AFTER the refresh above — the refresh can rewrite
+        // sourceAudioAbs's bytes, so probing before would let cost disclosure and the
+        // response duration-deviation check (below) validate a paid call's result against
+        // stale pre-refresh bytes, risking a false 502 after money was already spent.
+        const durationSec = (() => {
+          try { return ffprobeDurationSec(sourceAudioAbs); }
+          catch { return 0; }
+        })();
+        const costUsd = estimateAudioEnhanceCostUsd('elevenlabs-isolation', durationSec);
+        const costDisclosure = `ElevenLabs Voice Isolator — ~$${costUsd.toFixed(2)} for ${Math.round(durationSec)}s of audio`;
+
         const cacheKey = computeSourceHash(sourceAudioAbs);
         const assetRel = cleanedAssetRel(cacheKey);
         const assetAbs = assertInside(ws, assetRel);
 
-        // Idempotency: if the manifest already has an approved/pending cleanup with this
-        // cache key, return immediately without re-running the isolator.
         const current = loadManifest(ws);
         const existing = current.studioCleanup;
-        if (existing && existing.cacheKey === cacheKey && (existing.status === 'approved' || existing.status === 'pending')) {
+
+        // Value fingerprint of the channel-mix state baked into sourceAudioAbs right now
+        // (post-refresh above) — recorded on the cleanup so buildRenderPlan can detect a
+        // LATER fix change without relying on timestamp ordering (issue #3/#9/#11). Computed
+        // BEFORE the idempotency check below so a byte-identical fix transition (e.g.
+        // disabling a forced fix that had no effect on duplicated-channel audio) still
+        // restamps the changed fingerprint via the cache-hit branch, instead of an
+        // unconditional cacheKey match returning the stale fingerprint forever.
+        const audioChannelFixFingerprint = channelFixFingerprint(resolveChannelFixForAsset(current, 'input/source.mp4'));
+
+        // Idempotency: if the manifest already has an approved/pending cleanup with this
+        // cache key AND fingerprint, return immediately without re-running the isolator.
+        if (existing && existing.cacheKey === cacheKey && existing.audioChannelFixFingerprint === audioChannelFixFingerprint && (existing.status === 'approved' || existing.status === 'pending')) {
           return { studioCleanup: existing, manifest: current, validation: validateWorkspaceManifest(ws), costDisclosure, cached: true };
         }
 
         // Cache hit: asset already on disk from a prior run.
         if (existsSync(assetAbs)) {
-          const cleanup = { status: 'approved' as const, assetPath: assetRel, cacheKey, provider: 'studio-sound.elevenlabs-isolation', createdAt: new Date().toISOString(), costUsd };
+          const cleanup = { status: 'approved' as const, assetPath: assetRel, cacheKey, provider: 'studio-sound.elevenlabs-isolation', createdAt: new Date().toISOString(), costUsd, audioChannelFixFingerprint };
           const next = { ...current, studioCleanup: cleanup };
           saveManifest(ws, next);
           return { studioCleanup: cleanup, manifest: loadManifest(ws), validation: validateWorkspaceManifest(ws), costDisclosure, cached: true };
@@ -216,7 +243,8 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
           provider: 'studio-sound.elevenlabs-isolation',
           ...(providerId ? { providerId } : {}),
           createdAt: new Date().toISOString(),
-          costUsd: testMode ? 0 : costUsd
+          costUsd: testMode ? 0 : costUsd,
+          audioChannelFixFingerprint
         };
         const next = { ...current, studioCleanup: cleanup };
         saveManifest(ws, next);

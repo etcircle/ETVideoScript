@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
@@ -20,15 +20,29 @@ export type CliHandlerDeps = {
   extractAllClipAudio: typeof extractAllClipAudio;
   extractClipWaveformPeaks: typeof extractClipWaveformPeaks;
   extractAllClipWaveformPeaks: typeof extractAllClipWaveformPeaks;
+  applyChannelFix: typeof applyChannelFix;
   print: typeof print;
 };
-const defaultCliDeps: CliHandlerDeps = { extractClipAudio, extractAllClipAudio, extractClipWaveformPeaks, extractAllClipWaveformPeaks, print };
+const defaultCliDeps: CliHandlerDeps = { extractClipAudio, extractAllClipAudio, extractClipWaveformPeaks, extractAllClipWaveformPeaks, applyChannelFix, print };
 
 export async function handleExtractAudioCommand(opts: ExtractAudioCliOptions, rootOpts: RootCliOptions = {}, deps: CliHandlerDeps = defaultCliDeps) {
   const workspace = workspaceOption(rootOpts.workspace);
+  // Auto-detect single-channel-mic recordings before extraction so the pan applies to
+  // this run. Never blocks extraction: detection failure is a warning, and an existing
+  // audioChannelFix (approved or disabled) is always preserved by applyChannelFix.
+  let channelFix: ReturnType<typeof applyChannelFix> | undefined;
+  try {
+    channelFix = deps.applyChannelFix(workspace);
+    if (channelFix.action === 'applied') {
+      const { detection } = channelFix.fix;
+      console.warn(`Detected single-channel recording (L ${detection.leftRmsDb.toFixed(1)} dB / R ${detection.rightRmsDb.toFixed(1)} dB); using ${channelFix.fix.sourceChannel} channel. Revert with: ets fix-channels --disable`);
+    }
+  } catch (err) {
+    console.warn(`Channel-balance detection skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const common = { format: opts.format, sampleRate: Number(opts.sampleRate), overwrite: Boolean(opts.yes) };
   const outputs = opts.clip ? [await deps.extractClipAudio(workspace, opts.clip, common)] : await deps.extractAllClipAudio(workspace, common);
-  deps.print(rootOpts.json ? { outputs } : `Audio ready: ${outputs.join(', ')}`, rootOpts.json);
+  deps.print(rootOpts.json ? { outputs, ...(channelFix && channelFix.action !== 'unchanged' ? { channelFix } : {}) } : `Audio ready: ${outputs.join(', ')}`, rootOpts.json);
   return outputs;
 }
 
@@ -141,6 +155,38 @@ program.command('peaks').description('Regenerate waveform peaks')
   .option('--all', 'generate per-clip peaks for all clips')
   .action((opts) => {
     handlePeaksCommand(opts, program.opts());
+  });
+
+program.command('fix-channels').description('Detect/repair single-channel mic recordings (fill both channels from the live one)')
+  .option('--channel <side>', 'force left or right as the live channel')
+  .option('--disable', 'disable an existing channel fix (record is kept)')
+  .option('--detect-only', 'analyze and print channel balance without writing the manifest')
+  .action((opts) => {
+    const workspace = workspaceOption(program.opts().workspace);
+    if (opts.channel && !['left', 'right'].includes(opts.channel)) throw new Error('--channel must be left or right');
+    if (opts.detectOnly) {
+      const balance = analyzeChannelBalance(resolve(workspace, 'input/source.mp4'));
+      print(program.opts().json ? balance : `channels: ${balance.channels}\nleft RMS: ${balance.leftRmsDb?.toFixed(1) ?? 'n/a'} dB\nright RMS: ${balance.rightRmsDb?.toFixed(1) ?? 'n/a'} dB\nrecommendation: ${balance.recommendation ?? 'none (balanced or non-stereo)'}`, program.opts().json);
+      return;
+    }
+    const outcome = applyChannelFix(workspace, { channel: opts.channel as 'left' | 'right' | undefined, disable: Boolean(opts.disable) });
+    const summary = outcome.action === 'applied'
+      ? `Channel fix applied: ${outcome.fix.sourceChannel} (auto: ${outcome.fix.detection.auto}). Re-run "ets extract-audio --yes" and "ets transcribe" to refresh derived audio.`
+      : outcome.action === 'disabled' ? 'Channel fix disabled (record kept). Re-run "ets extract-audio --yes" to restore averaged extraction.'
+      : outcome.action === 'unchanged' ? `No change: ${outcome.reason}`
+      : `No fix needed: ${outcome.reason}`;
+    // Already-detached clips don't refresh through extract-audio/transcribe — the
+    // detached WAV is a separate derivative (assets/audio/<assetId>.wav) that only
+    // detach-audio (with refresh:true) revisits (issue #4).
+    const detachedClipIds = (outcome.action === 'applied' || outcome.action === 'disabled')
+      ? loadManifestV3(workspace).tracks.flatMap((track) => track.clips).filter((clip) => clip.audioDetached).map((clip) => clip.clipId)
+      : [];
+    const refreshNote = detachedClipIds.length
+      ? ` Clips with detached audio need a refresh: POST .../clips/<clipId>/detach-audio with {"refresh":true} for: ${detachedClipIds.join(', ')}.`
+      : '';
+    print(program.opts().json
+      ? { ...outcome, ...(detachedClipIds.length ? { detachedClipsNeedingRefresh: detachedClipIds } : {}) }
+      : summary + refreshNote, program.opts().json);
   });
 
 program.command('transcribe').description('Transcribe audio into transcript/words.json and transcript.md')
@@ -413,8 +459,12 @@ program.command('render').description('Render edited MP4 from manifest')
     if (skipped.length) {
       console.warn(`Skipping ${skipped.length} legacy voice_patch op(s) (re-create to apply ripple): ${skipped.map((o) => o.id).join(', ')}`);
     }
-    const output = await renderPlanV3(workspace, buildRenderPlanV3(manifest, loadTranscript(workspace) ?? undefined), { output: opts.output ?? (opts.preset === 'youtube' ? 'renders/final.mp4' : 'renders/draft.mp4'), overwrite: Boolean(opts.yes) });
-    print(program.opts().json ? { output, skipped: skipped.map((o) => o.id) } : `Rendered: ${output}`, program.opts().json);
+    const plan = buildRenderPlanV3(manifest, loadTranscript(workspace) ?? undefined);
+    if (plan.studioCleanupStale) {
+      console.warn('Studio cleanup predates the current channel-fix decision; rendering with raw (re-panned) audio instead of the cleaned asset. Re-run studio cleanup (paid) to restore noise removal for the corrected channel.');
+    }
+    const output = await renderPlanV3(workspace, plan, { output: opts.output ?? (opts.preset === 'youtube' ? 'renders/final.mp4' : 'renders/draft.mp4'), overwrite: Boolean(opts.yes) });
+    print(program.opts().json ? { output, skipped: skipped.map((o) => o.id), ...(plan.studioCleanupStale ? { studioCleanupStale: true } : {}) } : `Rendered: ${output}`, program.opts().json);
   });
 
 program.command('export-captions').description('Export edited captions from manifest')

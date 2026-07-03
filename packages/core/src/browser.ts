@@ -11,7 +11,7 @@ export { TransitionOperationSchema as TransitionOperationSchemaV3, transitionOpe
 export { CaptionStyleOperationSchema as CaptionStyleOperationSchemaV3, captionStyleOperationKind, type CaptionStyleOperation as CaptionStyleOperationV3 } from './operations/caption-style';
 export { TranscriptAmendOperationSchema as TranscriptAmendOperationSchemaV3, transcriptAmendOperationKind, type TranscriptAmendOperation as TranscriptAmendOperationV3 } from './operations/transcript-amend';
 export { OperationSchema as OperationSchemaV3, registeredOperationKinds, operationKindByType, getOperationKind, hasOperationKind, OPERATION_PRECEDENCE, type Operation as OperationV3 } from './operations/registry';
-export { ManifestV3Schema, RenderPresetSchema as RenderPresetSchemaV3, RenderPresetsSchema as RenderPresetsSchemaV3, StudioCleanupSchema, type ManifestV3, type StudioCleanup } from './manifest/schema';
+export { ManifestV3Schema, RenderPresetSchema as RenderPresetSchemaV3, RenderPresetsSchema as RenderPresetsSchemaV3, StudioCleanupSchema, AudioChannelFixSchema, type ManifestV3, type StudioCleanup, type AudioChannelFix } from './manifest/schema';
 export { validateManifestV3Document, validateManifest, validateOperationOverlaps, operationPrecedence, type ManifestV3ValidationContext, type ManifestV3ValidationResult, type OverlapCandidate } from './manifest/validate';
 export { addOperation, updateOperation, type OperationInput, type OperationPatch } from './manifest/apply';
 export { type TimeMap, type TimeMapSegment } from './timeMap/types';

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createWorkspace, latestJobs, loadManifestV3, loadProject, saveManifestV3, saveProject } from '@etvideoscript/core';
+import { createWorkspace, latestJobs, loadManifestV3, loadProject, saveManifestV3, saveProject, writeChannelFixSidecar } from '@etvideoscript/core';
 import { createApp } from './server';
 
 function config(root: string) {
@@ -119,6 +119,11 @@ describe('peaks API', () => {
       writeFileSync(join(workspace, 'input/source-2.mp4'), Buffer.from('placeholder'));
       writeFileSync(join(workspace, 'media/clip_001/extracted-audio.wav'), wavSilence());
       writeFileSync(join(workspace, 'media/clip_002/extracted-audio.wav'), wavSilence());
+      // Simulate audio that was already extracted with no channel fix active: a missing
+      // sidecar now always forces a regeneration (issue #6), which would fail here since
+      // the "source" files above are text placeholders, not real media ffmpeg can read.
+      writeChannelFixSidecar(join(workspace, 'media/clip_001/extracted-audio.wav'), undefined);
+      writeChannelFixSidecar(join(workspace, 'media/clip_002/extracted-audio.wav'), undefined);
       expect(existsSync(join(workspace, 'media/extracted-audio.wav'))).toBe(false);
 
       const extractQueued = await app.inject({ method: 'POST', url: '/api/projects/episode-001/jobs', payload: { type: 'extract-audio' } });

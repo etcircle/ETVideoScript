@@ -16,6 +16,7 @@ describe('handlePeaksCommand', () => {
           { clipId: 'clip_002', peaks: 3 }
         ];
       }) as any,
+      applyChannelFix: (() => ({ action: 'none', reason: 'test', balance: { channels: 2, leftRmsDb: -18, rightRmsDb: -19, recommendation: null } })) as any,
       print: ((value: unknown) => { printed.push(value); }) as any,
       ...overrides
     } as CliHandlerDeps & { extractAllClipWaveformPeaks: (workspace: string, options: { resolutionHz?: number }) => Array<{ clipId: string; peaks: number }> };

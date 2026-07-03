@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, appendFileSync, copyFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, appendFileSync, copyFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { assertInside, loadProject, saveProject, sha256File, nowIso } from './filesystem';
@@ -6,14 +6,14 @@ import { appendJobStatus, makeJobId } from './jobs';
 import { ClipSourceMetadataSchema } from './schemas';
 import { extractClipWaveformPeaks, extractWaveformPeaks } from './waveform';
 import { loadManifestV3, saveManifestV3 } from './manifest/io';
-import { addAsset } from './assets/operations';
+import { addAsset, updateAsset } from './assets/operations';
 import { addClip } from './tracks/operations';
+import { run, probeRecordingMedia, type RecordingProbe } from './ffprobe';
+import { resolveChannelFixForAsset } from './channelFixScope';
+import { channelFixSidecarFresh, writeChannelFixSidecar } from './channelFixSidecar';
 
-function run(command: string, args: string[], cwd?: string) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
-  if (result.status !== 0) throw new Error(`${command} failed: ${result.stderr || result.stdout}`);
-  return result.stdout;
-}
+// Re-exported for back-compat: callers previously imported these from media.ts.
+export { probeRecordingMedia, type RecordingProbe };
 
 export function commandAvailable(command: string): boolean {
   const result = spawnSync(command, ['-version'], { encoding: 'utf8' });
@@ -29,35 +29,6 @@ export function ffprobeDurationSec(filePath: string): number {
   const duration = Number(stdout.trim());
   if (!Number.isFinite(duration) || duration < 0) throw new Error(`Could not read media duration: ${filePath}`);
   return duration;
-}
-
-function fpsFromStream(video: any): number {
-  const fpsText = video.avg_frame_rate || video.r_frame_rate || '0/1';
-  const [num, den] = String(fpsText).split('/').map(Number);
-  return den ? num / den : Number(fpsText) || 0;
-}
-
-export type RecordingProbe = {
-  durationSec: number;
-  hasVideo: boolean;
-  hasAudio: boolean;
-  video?: { width: number; height: number; fps: number; codec?: string; pixelFormat?: string };
-  audio?: { sampleRate?: number; channels?: number; codec?: string };
-};
-
-export function probeRecordingMedia(filePath: string): RecordingProbe {
-  const stdout = run('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath]);
-  const data = JSON.parse(stdout);
-  const video = data.streams?.find((s: any) => s.codec_type === 'video');
-  const audio = data.streams?.find((s: any) => s.codec_type === 'audio');
-  const durationSec = Number(data.format?.duration || video?.duration || audio?.duration || 0);
-  return {
-    durationSec: Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0,
-    hasVideo: Boolean(video),
-    hasAudio: Boolean(audio),
-    video: video ? { width: Number(video.width || 0), height: Number(video.height || 0), fps: fpsFromStream(video), codec: video.codec_name || undefined, pixelFormat: video.pix_fmt || undefined } : undefined,
-    audio: audio ? { sampleRate: audio.sample_rate ? Number(audio.sample_rate) : undefined, channels: audio.channels ? Number(audio.channels) : undefined, codec: audio.codec_name || undefined } : undefined
-  };
 }
 
 export function ffprobe(filePath: string) {
@@ -109,47 +80,124 @@ export async function importSource(workspacePath: string, filePath: string, opti
     }
   }
 
-  if (!samePath && options.copy !== false && (!targetExists || options.replace || sha256File(target) !== sourceHash)) {
-    const stage = `${target}.import-${process.pid}-${Date.now()}`;
-    try {
-      copyFileSync(sourceInput, stage);
-      // Re-probe the staged file before atomically promoting it.
-      ffprobe(stage);
-      renameSync(stage, target);
-    } catch (err) {
-      rmSync(stage, { force: true });
-      throw err;
-    }
-  }
+  const willCopy = !samePath && options.copy !== false && (!targetExists || options.replace || sha256File(target) !== sourceHash);
 
-  const finalMetadata = ffprobe(target);
-  const project = loadProject(workspace);
-  const clipSource = { ...finalMetadata, originalFilename: basename(sourceInput) };
-  project.clipSources = [clipSource];
-  project.status.imported = true;
-  project.updatedAt = nowIso();
-  saveProject(project);
-  let manifest = loadManifestV3(workspace);
-  const assetId = 'asset_video_001';
-  const clipId = 'clip_001';
-  if (!manifest.assets.some((asset) => asset.assetId === assetId)) {
-    manifest = addAsset(manifest, {
-      assetId,
-      kind: 'video',
-      path: 'input/source.mp4',
-      durationSec: clipSource.durationSec,
-      provenance: 'imported',
-      video: { width: clipSource.width, height: clipSource.height, fps: clipSource.fps, codec: clipSource.videoCodec || undefined, pixelFormat: clipSource.pixelFormat || undefined },
-      audio: clipSource.audioSampleRate ? { sampleRate: clipSource.audioSampleRate, codec: clipSource.audioCodec || undefined } : undefined
-    }).manifest;
+  // VALIDATE THEN PROMOTE (issue #1): stage the new bytes (if copying) WITHOUT promoting
+  // them onto input/source.mp4 yet, build the prospective manifest mutation entirely in
+  // memory against the STAGED bytes, and only rename/save once that mutation has been
+  // proven valid. A shorter replacement that would leave an existing clip's sourceEnd
+  // past the new asset's durationSec must be rejected BEFORE input/source.mp4 or
+  // project.json are touched — never a split-brain workspace with new bytes but a stale
+  // (or now-invalid) manifest silently left in place.
+  let stage: string | undefined;
+  try {
+    if (willCopy) {
+      stage = `${target}.import-${process.pid}-${Date.now()}`;
+      copyFileSync(sourceInput, stage);
+    }
+    // Probe the bytes that will actually land at target — this also re-validates the
+    // staged file is readable before it's ever promoted (previously a separate `ffprobe(stage)`
+    // call whose result was discarded).
+    const probeSource = stage ?? target;
+    const finalMetadata = ffprobe(probeSource);
+    const project = loadProject(workspace);
+    // Captured BEFORE clipSources is overwritten below: the hash importSource recorded the
+    // last time it ran against this workspace, i.e. what audioChannelFix (if any) was
+    // analyzed against. Covers both a copied-in replace and an in-place edit at samePath —
+    // either way, a changed hash means the previous fix/metadata describe stale bytes.
+    // Compared against finalMetadata.sha256 (the STAGED/final bytes), not the earlier
+    // sourceHash probe of the caller-supplied path (issue #12) — closes the window where
+    // the external file changes between the initial probe (line 66) and the copy above.
+    const previousSourceHash = project.clipSources[0]?.sha256;
+    const clipSource = { ...finalMetadata, originalFilename: basename(sourceInput) };
+    const contentReplaced = previousSourceHash !== undefined && previousSourceHash !== finalMetadata.sha256;
+    const audioMetadata = clipSource.audioSampleRate ? { sampleRate: clipSource.audioSampleRate, channels: probeRecordingMedia(probeSource).audio?.channels, codec: clipSource.audioCodec || undefined } : undefined;
+
+    let manifest = loadManifestV3(workspace);
+    const assetId = 'asset_video_001';
+    const clipId = 'clip_001';
+    if (!manifest.assets.some((asset) => asset.assetId === assetId)) {
+      manifest = addAsset(manifest, {
+        assetId,
+        kind: 'video',
+        path: 'input/source.mp4',
+        durationSec: clipSource.durationSec,
+        provenance: 'imported',
+        video: { width: clipSource.width, height: clipSource.height, fps: clipSource.fps, codec: clipSource.videoCodec || undefined, pixelFormat: clipSource.pixelFormat || undefined },
+        audio: audioMetadata
+      }).manifest;
+    } else if (contentReplaced) {
+      // Replacing the recording with different bytes: refresh the asset's probed metadata
+      // (incl. channel count) so it describes the NEW media, not whatever was probed when
+      // the asset record was first created — buildRenderPlan's channel-count guard and any
+      // future fix depend on this staying accurate. updateAsset validates the resulting
+      // manifest internally and THROWS here (before any promotion below) if the new,
+      // shorter duration would leave an existing clip's sourceEnd past it.
+      manifest = updateAsset(manifest, {
+        assetId,
+        patch: {
+          durationSec: clipSource.durationSec,
+          video: { width: clipSource.width, height: clipSource.height, fps: clipSource.fps, codec: clipSource.videoCodec || undefined, pixelFormat: clipSource.pixelFormat || undefined },
+          audio: audioMetadata
+        }
+      }).manifest;
+    }
+    if (!manifest.tracks.some((track) => track.clips.some((clip) => clip.clipId === clipId))) {
+      const videoTrack = manifest.tracks.find((track) => track.kind === 'video') ?? manifest.tracks[0];
+      if (!videoTrack) throw new Error('Manifest has no video track');
+      manifest = addClip(manifest, { trackId: videoTrack.trackId, clip: { clipId, assetId, sourceStart: 0, sourceEnd: clipSource.durationSec, timelineStart: 0 } }).manifest;
+    }
+    // A real content replacement invalidates any approved channel fix — it was computed
+    // against the OLD bytes. Disable (never delete) so the record + its history survive;
+    // the user re-runs `ets fix-channels` for a fresh recommendation on the new recording.
+    // Auto-detection never overwrites a disabled record by design, so this doesn't
+    // auto-re-detect — an explicit re-run is required, which is the correct, reversible
+    // behavior (see applyChannelFix).
+    if (contentReplaced && manifest.audioChannelFix?.status === 'approved') {
+      manifest = { ...manifest, audioChannelFix: { ...manifest.audioChannelFix, status: 'disabled', appliedAt: nowIso() } };
+    }
+
+    // Every prospective mutation above has been validated (addAsset/updateAsset/addClip
+    // each validate internally) — only NOW promote: rename the staged bytes into place,
+    // then persist project.json and the manifest. Nothing above this point touched
+    // workspace state, so a throw anywhere above leaves input/source.mp4, project.json,
+    // and edits/manifest.json byte-for-byte unchanged — a retry throws identically.
+    if (stage) renameSync(stage, target);
+    project.clipSources = [clipSource];
+    project.status.imported = true;
+    project.updatedAt = nowIso();
+    saveProject(project);
+    saveManifestV3(workspace, manifest, { revision: false });
+    return project;
+  } catch (err) {
+    if (stage) rmSync(stage, { force: true });
+    throw err;
   }
-  if (!manifest.tracks.some((track) => track.clips.some((clip) => clip.clipId === clipId))) {
-    const videoTrack = manifest.tracks.find((track) => track.kind === 'video') ?? manifest.tracks[0];
-    if (!videoTrack) throw new Error('Manifest has no video track');
-    manifest = addClip(manifest, { trackId: videoTrack.trackId, clip: { clipId, assetId, sourceStart: 0, sourceEnd: clipSource.durationSec, timelineStart: 0 } }).manifest;
+}
+
+// Approved audioChannelFix → live channel of the base recording; undefined otherwise.
+// Tolerates a missing/invalid manifest: extraction must keep working in degraded
+// workspaces, and the fix simply doesn't apply there.
+function manifestSourceChannel(workspace: string): 'left' | 'right' | undefined {
+  try {
+    const manifest = loadManifestV3(workspace);
+    return manifest.audioChannelFix?.status === 'approved' ? manifest.audioChannelFix.sourceChannel : undefined;
+  } catch {
+    return undefined;
   }
-  saveManifestV3(workspace, manifest, { revision: false });
-  return project;
+}
+
+// Mono-downmix args for extraction. Default `-ac 1` AVERAGES all channels, so a
+// dead channel dilutes speech by ~6 dB; with an approved channel fix we take ONLY
+// the live channel. Falls back to -ac 1 when the file is not exactly 2-channel
+// stereo — a pan referencing a channel a mono file lacks would fail the whole
+// ffmpeg run, and a 5.1/7.1 source would drop center-channel dialogue by
+// selecting only c0/c1.
+function monoDownmixArgs(sourceChannel: 'left' | 'right' | undefined, sourcePath: string): string[] {
+  if (!sourceChannel) return ['-ac', '1'];
+  const channels = probeRecordingMedia(sourcePath).audio?.channels ?? 0;
+  if (channels !== 2) return ['-ac', '1'];
+  return ['-af', `pan=mono|c0=${sourceChannel === 'left' ? 'c0' : 'c1'}`];
 }
 
 export async function extractAudio(workspacePath: string, options: { format?: 'wav' | 'mp3'; sampleRate?: number; overwrite?: boolean; logJob?: boolean } = {}) {
@@ -159,13 +207,20 @@ export async function extractAudio(workspacePath: string, options: { format?: 'w
   const format = options.format || 'wav';
   const outputRel = `media/extracted-audio.${format}`;
   const output = assertInside(workspace, outputRel);
-  if (existsSync(output) && !options.overwrite) {
+  const sourceChannel = manifestSourceChannel(workspace);
+  // Cache reuse requires the fingerprint sidecar to match the CURRENT fix state, not just
+  // file existence — otherwise a fix applied/changed/disabled after the last extraction
+  // silently keeps serving audio mixed for the old (or absent) state (issue #1). It also
+  // requires the derivative to be at least as new as the source (issue #2) — otherwise a
+  // source replace (importSource) keeps serving audio extracted from the OLD recording.
+  if (!options.overwrite && channelFixSidecarFresh(output, sourceChannel, source)) {
     if (format === 'wav' && !existsSync(assertInside(workspace, 'media/peaks.json'))) extractWaveformPeaks(workspace);
     return outputRel;
   }
   mkdirSync(join(workspace, 'media'), { recursive: true });
   const codec = format === 'wav' ? ['-acodec', 'pcm_s16le'] : ['-codec:a', 'libmp3lame', '-b:a', '96k'];
-  run('ffmpeg', ['-y', '-i', source, '-vn', '-ac', '1', '-ar', String(options.sampleRate || 16000), ...codec, output], workspace);
+  run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(options.sampleRate || 16000), ...codec, output], workspace);
+  writeChannelFixSidecar(output, sourceChannel);
   const outputs = [outputRel];
   if (format === 'wav') {
     extractWaveformPeaks(workspace);
@@ -191,13 +246,17 @@ export async function extractClipAudio(workspacePath: string, clipId: string, op
   const format = options.format || 'wav';
   const outputRel = `media/${clipId}/extracted-audio.${format}`;
   const output = assertInside(workspace, outputRel);
-  if (existsSync(output) && !options.overwrite) {
+  // Scoped to THIS clip's asset (issue #4) — the base recording's fix must not silently
+  // pan an unrelated imported clip/b-roll asset.
+  const sourceChannel = resolveChannelFixForAsset(manifest, asset.path);
+  if (!options.overwrite && channelFixSidecarFresh(output, sourceChannel, source)) {
     if (format === 'wav' && !existsSync(assertInside(workspace, `media/${clipId}/peaks.json`))) extractClipWaveformPeaks(workspace, clipId);
     return outputRel;
   }
   mkdirSync(join(workspace, 'media', clipId), { recursive: true });
   const codec = format === 'wav' ? ['-acodec', 'pcm_s16le'] : ['-codec:a', 'libmp3lame', '-b:a', '96k'];
-  run('ffmpeg', ['-y', '-i', source, '-vn', '-ac', '1', '-ar', String(options.sampleRate || 16000), ...codec, output], workspace);
+  run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(options.sampleRate || 16000), ...codec, output], workspace);
+  writeChannelFixSidecar(output, sourceChannel);
   const outputs = [outputRel];
   if (format === 'wav') { extractClipWaveformPeaks(workspace, clipId); outputs.push(`media/${clipId}/peaks.json`); }
   const project = loadProject(workspace);
@@ -275,6 +334,9 @@ export async function extractFullBandReference(
     throw new Error('reference derivative must not overwrite the 16 kHz STT/peaks audio');
   }
   const sourceDurationSec = ffprobeDurationSec(source);
+  // Scoped to THIS clip's asset (issue #4) — the base recording's fix must not silently
+  // pan an unrelated imported clip/b-roll asset used as a voice-clone reference.
+  const sourceChannel = resolveChannelFixForAsset(manifest, asset.path);
   // Cache reuse only a REAL file (a symlink could redirect the overwrite below onto the source),
   // fresh relative to the source (clip repoint / source replace re-extracts), that still probes as
   // a COMPLETE 48k mono derivative (rejects a valid-header-but-truncated cache).
@@ -284,8 +346,16 @@ export async function extractFullBandReference(
   // bumps mtime (caught here). A hand-crafted swap of same-duration audio with a backdated mtime
   // would reuse a stale derivative, but that's outside this local-first, single-user threat model;
   // `overwrite: true` is always available. A source-hash sidecar isn't worth the machinery here.
-  if (existsSync(output) && !options.overwrite && !lstatSync(output).isSymbolicLink()
-      && statSync(output).mtimeMs >= statSync(source).mtimeMs && isValidFullBandReference(output, sourceDurationSec)) {
+  //
+  // audioChannelFix is also a freshness dimension: the derivative's channel mix (mono-downmix vs.
+  // live-channel-only) depends on it, so an apply/re-apply/disable after extraction must invalidate
+  // the cache even though the source file itself hasn't changed. Keyed by a value fingerprint
+  // (issue #5), not appliedAt/mtime ordering — immune to a restored older revision or a
+  // hand-edited sourceChannel whose appliedAt wasn't bumped to match. The symlink/mtime/fingerprint
+  // checks above live in channelFixSidecarFresh (shared with extractAudio/extractClipAudio/
+  // extractAudioAssetInWorkspace) — isValidFullBandReference below adds the format/duration check
+  // that's unique to this derivative.
+  if (!options.overwrite && channelFixSidecarFresh(output, sourceChannel, source) && isValidFullBandReference(output, sourceDurationSec)) {
     return outputRel;
   }
   mkdirSync(join(workspace, 'media', clipId), { recursive: true });
@@ -296,12 +366,13 @@ export async function extractFullBandReference(
   const tempDir = mkdtempSync(join(workspace, 'media', clipId, '.ref-'));
   const stage = join(tempDir, 'reference-48k.wav');
   try {
-    run('ffmpeg', ['-y', '-i', source, '-vn', '-ac', '1', '-ar', String(FULLBAND_REFERENCE_HZ), '-acodec', 'pcm_s16le', stage], workspace);
+    run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(FULLBAND_REFERENCE_HZ), '-acodec', 'pcm_s16le', stage], workspace);
     if (!isValidFullBandReference(stage, sourceDurationSec)) throw new Error('reference derivative failed validation (expected complete 48 kHz mono pcm_s16le)');
     renameSync(stage, output);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+  writeChannelFixSidecar(output, sourceChannel);
   return outputRel;
 }
 

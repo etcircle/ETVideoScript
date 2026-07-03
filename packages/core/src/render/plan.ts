@@ -1,4 +1,5 @@
 import type { ManifestV3 } from '../manifest/schema';
+import { channelFixFingerprint, resolveChannelFixForAsset } from '../channelFixScope';
 import { getOperationKind } from '../operations/registry';
 import type { RenderStage } from './types';
 import type { Clip, Track } from '../tracks/schema';
@@ -52,6 +53,22 @@ export interface V3RenderPlan {
    * Absent when no cleanup is active or it is disabled.
    */
   studioCleanupAudioPath?: string;
+  /**
+   * True when an approved studioCleanup was suppressed because it predates the
+   * current audioChannelFix decision (see the studioCleanupStale computation
+   * below). Callers (CLI/API) should surface this as a warning: the render
+   * falls back to the base video audio (re-panned by audioSourceChannel)
+   * instead of a cleaned asset that was produced from the OLD channel mix.
+   */
+  studioCleanupStale?: boolean;
+  /**
+   * When set, the pipeline duplicates this channel of embedded video audio to
+   * both stereo channels (single-channel-mic fix, pan=stereo|c0=cN|c1=cN).
+   * Populated by buildRenderPlan when manifest.audioChannelFix.status ===
+   * 'approved', the project has a single video source (same scope guard as
+   * studioCleanup), and the base asset is known to be exactly 2-channel.
+   */
+  audioSourceChannel?: 'left' | 'right';
 }
 
 function assetById(manifest: ManifestV3): Map<string, Asset> {
@@ -195,10 +212,53 @@ export function buildRenderPlan(manifest: ManifestV3, transcript?: TranscriptWor
       .filter((t) => t.kind === 'video')
       .flatMap((t) => (t.clips ?? []).map((c) => c.assetId))
   );
+
+  const baseVideoAssetId = videoSourceIds.size === 1 ? Array.from(videoSourceIds)[0] : undefined;
+  const baseVideoAsset = baseVideoAssetId !== undefined ? manifest.assets.find((asset) => asset.assetId === baseVideoAssetId) : undefined;
+
+  // Staleness guard: a channel-fix apply/disable AFTER the cleanup was generated means
+  // the cleaned asset was produced from audio with the OLD (or absent) channel mix.
+  // Re-running the cleanup is a PAID call (studio-sound.elevenlabs-isolation) that must
+  // never happen automatically, so instead of silently serving stale cleaned audio, fall
+  // back to the base video audio — audioSourceChannel (below) then correctly repans it.
+  //
+  // Keyed by a VALUE fingerprint of the fix (issue #3/#9/#11), not appliedAt/createdAt
+  // ordering: timestamp ordering can't tell a real fix change from a same-value re-apply
+  // churning appliedAt, races on same-millisecond timestamps, and is defeated by a
+  // future-dated hand edit. studioCleanupRoutes stamps audioChannelFixFingerprint at
+  // creation time; a MISSING fingerprint only counts as stale when an audioChannelFix
+  // record actually exists to compare against — a cleanup + no channel-fix history at
+  // all (the common case, and every pre-fingerprint-field manifest) is never stale.
+  const currentFixFingerprint = channelFixFingerprint(resolveChannelFixForAsset(manifest, 'input/source.mp4'));
+  const studioCleanupStale =
+    manifest.studioCleanup?.status === 'approved'
+    && !!manifest.audioChannelFix
+    && manifest.studioCleanup.audioChannelFixFingerprint !== currentFixFingerprint;
+
+  // SCOPE GUARD (issue #5): studioCleanup describes ONLY input/source.mp4's audio — a
+  // project whose single remaining video source is some OTHER asset (e.g. the base clip
+  // was removed, leaving one unrelated import) must not have that asset's audio swapped
+  // for the cleaned WAV. resolveChannelFixForAsset already encodes this literal-path rule
+  // for the channel fix below; studioCleanup reuses the same check directly since its
+  // scope guard is identical (single project-level record describing input/source.mp4).
   const studioCleanupAudioPath =
-    manifest.studioCleanup?.status === 'approved' && videoSourceIds.size <= 1
+    manifest.studioCleanup?.status === 'approved' && videoSourceIds.size <= 1 && baseVideoAsset?.path === 'input/source.mp4' && !studioCleanupStale
       ? manifest.studioCleanup.assetPath
       : undefined;
+
+  // Single-channel-mic fix: same single-source scope guard as studioCleanup — the
+  // fix describes the base recording, so a multi-source project must not pan clips
+  // it does not describe. resolveChannelFixForAsset enforces the input/source.mp4 path
+  // check directly (issue #5) instead of trusting "exactly one video source" alone,
+  // which would still pan an unrelated single remaining asset. The channels guard
+  // requires EXACTLY 2 (a pan referencing a channel a mono file lacks would fail the
+  // ffmpeg run; a 5.1/7.1 source would drop center-channel dialogue by selecting only
+  // c0/c1). applyChannelFix backfills this asset's audio.channels from its live probe
+  // at apply time, so this stays reliable for both new imports and pre-existing legacy
+  // assets once a fix is (re-)applied.
+  const scopedChannel = baseVideoAsset ? resolveChannelFixForAsset(manifest, baseVideoAsset.path) : undefined;
+  const audioSourceChannel =
+    videoSourceIds.size <= 1 && baseVideoAsset?.audio?.channels === 2 ? scopedChannel : undefined;
 
   return {
     schemaVersion: 3,
@@ -212,6 +272,8 @@ export function buildRenderPlan(manifest: ManifestV3, transcript?: TranscriptWor
     targetProfile: renderProfile(manifest),
     outputDurationSec,
     captionCues: hasCaptionBurn && transcript ? projectCaptions(manifest, transcript, timeMap) : undefined,
-    ...(studioCleanupAudioPath !== undefined ? { studioCleanupAudioPath } : {})
+    ...(studioCleanupAudioPath !== undefined ? { studioCleanupAudioPath } : {}),
+    ...(studioCleanupStale ? { studioCleanupStale } : {}),
+    ...(audioSourceChannel !== undefined ? { audioSourceChannel } : {})
   };
 }

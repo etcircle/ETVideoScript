@@ -141,6 +141,15 @@ function parseResolution(value: string): { width: number; height: number } | nul
   return { width, height };
 }
 
+// Single-channel-mic fix: duplicate the live channel of a one-sided recording to
+// both stereo channels. Applied ONLY to chains reading embedded audio from the
+// source video; generated audio (anullsrc, voice patches, sine beds) and the
+// studio-cleaned WAV (derived from channel-fixed extraction) are not one-sided.
+function channelFixPan(channel: 'left' | 'right'): string {
+  const live = channel === 'left' ? 'c0' : 'c1';
+  return `pan=stereo|c0=${live}|c1=${live}`;
+}
+
 function atempoChain(rate: number): string {
   const parts: string[] = [];
   let remaining = rate;
@@ -193,7 +202,8 @@ export const stageHandlers = {
     const sourceStart = segment.clip.sourceStart + segment.sourceStart + ((stage.range.start - segment.outputStart) * segment.rate);
     const sourceEnd = segment.clip.sourceStart + segment.sourceStart + ((stage.range.end - segment.outputStart) * segment.rate);
     const tempo = Math.max((sourceEnd - sourceStart) / duration, 0.01);
-    filters.push(`[${inputIndex}:a]atrim=start=${roundSec6(sourceStart)}:end=${roundSec6(sourceEnd)},asetpts=PTS-STARTPTS,${atempoChain(tempo)},atrim=0:${roundSec6(duration)},adelay=${delay}|${delay}[${label}]`);
+    const pan = plan.audioSourceChannel && segment.source === 'embedded-video-audio' ? `${channelFixPan(plan.audioSourceChannel)},` : '';
+    filters.push(`[${inputIndex}:a]${pan}atrim=start=${roundSec6(sourceStart)}:end=${roundSec6(sourceEnd)},asetpts=PTS-STARTPTS,${atempoChain(tempo)},atrim=0:${roundSec6(duration)},adelay=${delay}|${delay}[${label}]`);
     mixInputs.push(`[${label}]`);
     return labelSeed + 1;
   },
@@ -323,6 +333,9 @@ export function buildFfmpegCommand(workspacePath: string, plan: V3RenderPlan, ou
       // The cleaned WAV has the same duration as the source recording (EL Isolator preserves
       // length), so sourceStart/sourceEnd timings are directly reusable.
       const audioInputIndex = cleanInputIndex !== undefined ? cleanInputIndex : inputIndex;
+      // Channel fix applies only when reading the ORIGINAL video audio; the studio-
+      // cleaned WAV swap already carries fixed audio.
+      if (plan.audioSourceChannel && cleanInputIndex === undefined) af.unshift(channelFixPan(plan.audioSourceChannel));
       // Smart fade: emit afade ONLY at ripple-cut source-time discontinuities (NOT at every
       // segment boundary). Cuts glue segments back-to-back; the sample-step at the seam
       // creates a click/pop ffmpeg-side. Voice_patch boundaries are handled separately by
@@ -357,7 +370,8 @@ export function buildFfmpegCommand(workspacePath: string, plan: V3RenderPlan, ou
     const clipOffset = segment.clip.sourceStart + segment.sourceStart;
     const clipEnd = segment.clip.sourceStart + segment.sourceEnd;
     const delay = adelayMs(segment.outputStart);
-    audioFilters.push(`[${inputIndex}:a]atrim=start=${roundSec6(clipOffset)}:end=${roundSec6(clipEnd)},asetpts=PTS-STARTPTS,adelay=${delay}|${delay}[mix${structuralAudioIndex}]`);
+    const pan = plan.audioSourceChannel && segment.source === 'embedded-video-audio' ? `${channelFixPan(plan.audioSourceChannel)},` : '';
+    audioFilters.push(`[${inputIndex}:a]${pan}atrim=start=${roundSec6(clipOffset)}:end=${roundSec6(clipEnd)},asetpts=PTS-STARTPTS,adelay=${delay}|${delay}[mix${structuralAudioIndex}]`);
     mixInputs.push(`[mix${structuralAudioIndex}]`);
     structuralAudioIndex += 1;
   }
