@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertInside, channelFixFingerprint, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, readSecrets, resolveChannelFixForAsset } from '@etvideoscript/core';
+import { assertInside, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, readSecrets, sourceChannelFixFingerprint, type ManifestV3 } from '@etvideoscript/core';
 import type { LocalApiRouteContext } from './routeContext';
 
 /**
@@ -28,17 +28,22 @@ function cleanedAssetRel(cacheKey: string): string {
  * Return the workspace-relative path of the project's primary audio file.
  * For a normal ETVideo project this is media/extracted-audio.wav.
  */
-function primaryAudioRel(ws: string): string {
+function primaryAudioRel(ws: string, manifest: ManifestV3): string {
   // Prefer the legacy top-level extracted audio (processed once, stable).
   const extracted = 'media/extracted-audio.wav';
   if (existsSync(assertInside(ws, extracted))) return extracted;
 
   // Per-clip layout (current real projects): media/<clipId>/extracted-audio.wav.
   // Pick the clip whose extracted audio is largest (the base/primary recording).
+  // Restricted to LIVE clip ids: removing a clip never deletes its media/<clipId>/
+  // dir, so an orphaned dir must not be picked as primary — it can no longer be
+  // refreshed or re-derived from a manifest clip that no longer exists.
+  const liveClipIds = new Set(manifest.tracks.flatMap((track) => track.clips.map((clip) => clip.clipId)));
   const mediaDir = assertInside(ws, 'media');
   if (existsSync(mediaDir)) {
     let best: { rel: string; size: number } | null = null;
     for (const entry of readdirSync(mediaDir)) {
+      if (!liveClipIds.has(entry)) continue;
       const candidate = join(mediaDir, entry, 'extracted-audio.wav');
       if (existsSync(candidate)) {
         const size = statSync(candidate).size;
@@ -92,7 +97,7 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
       // Identify source audio.
       let primaryAudio: string;
       try {
-        primaryAudio = primaryAudioRel(ws);
+        primaryAudio = primaryAudioRel(ws, loadManifest(ws));
       } catch (err) {
         return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
       }
@@ -108,10 +113,16 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
         // extractClipAudio are self-freshening (channelFixSidecarFresh) and cheap/local/
         // non-paid, so this is always safe to run before every studio-cleanup call.
         const clipAudioMatch = /^media\/([^/]+)\/extracted-audio\.wav$/.exec(primaryAudio);
-        if (primaryAudio === 'media/extracted-audio.wav') {
-          await extractAudio(ws, { overwrite: false, logJob: false });
-        } else if (clipAudioMatch) {
-          await extractClipAudio(ws, clipAudioMatch[1]!, { overwrite: false, logJob: false });
+        try {
+          if (primaryAudio === 'media/extracted-audio.wav') {
+            await extractAudio(ws, { overwrite: false, logJob: false });
+          } else if (clipAudioMatch) {
+            await extractClipAudio(ws, clipAudioMatch[1]!, { overwrite: false, logJob: false });
+          }
+        } catch {
+          // Refresh is best-effort: primaryAudioRel already confirmed audio bytes exist
+          // on disk, so a missing input/source.mp4 or a clip removed since extraction
+          // just means cleanup proceeds against the bytes already there.
         }
 
         // Duration/cost must be probed AFTER the refresh above — the refresh can rewrite
@@ -139,7 +150,7 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
         // disabling a forced fix that had no effect on duplicated-channel audio) still
         // restamps the changed fingerprint via the cache-hit branch, instead of an
         // unconditional cacheKey match returning the stale fingerprint forever.
-        const audioChannelFixFingerprint = channelFixFingerprint(resolveChannelFixForAsset(current, 'input/source.mp4'));
+        const audioChannelFixFingerprint = sourceChannelFixFingerprint(current);
 
         // Idempotency: if the manifest already has an approved/pending cleanup with this
         // cache key AND fingerprint, return immediately without re-running the isolator.

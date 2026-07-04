@@ -9,7 +9,7 @@ import { loadManifestV3, saveManifestV3 } from './manifest/io';
 import { addAsset, updateAsset } from './assets/operations';
 import { addClip } from './tracks/operations';
 import { run, probeRecordingMedia, type RecordingProbe } from './ffprobe';
-import { resolveChannelFixForAsset } from './channelFixScope';
+import { channelFixMonoPan, resolveChannelFixForAsset } from './channelFixScope';
 import { channelFixSidecarFresh, writeChannelFixSidecar } from './channelFixSidecar';
 
 // Re-exported for back-compat: callers previously imported these from media.ts.
@@ -53,7 +53,10 @@ export function ffprobe(filePath: string) {
     pixelFormat: String(video.pix_fmt || '')
   });
   if (!metadata.durationSec || !metadata.width || !metadata.height || !metadata.fps) throw new Error(`Not a usable video file: ${filePath}`);
-  return metadata;
+  // audioChannels rides alongside the schema-validated metadata (not part of
+  // ClipSourceMetadataSchema) so callers that need the channel count can read it
+  // off this same probe instead of spawning a second, redundant ffprobe process.
+  return { ...metadata, audioChannels: audio.channels ? Number(audio.channels) : undefined };
 }
 
 export async function importSource(workspacePath: string, filePath: string, options: { copy?: boolean; replace?: boolean } = {}) {
@@ -111,7 +114,7 @@ export async function importSource(workspacePath: string, filePath: string, opti
     const previousSourceHash = project.clipSources[0]?.sha256;
     const clipSource = { ...finalMetadata, originalFilename: basename(sourceInput) };
     const contentReplaced = previousSourceHash !== undefined && previousSourceHash !== finalMetadata.sha256;
-    const audioMetadata = clipSource.audioSampleRate ? { sampleRate: clipSource.audioSampleRate, channels: probeRecordingMedia(probeSource).audio?.channels, codec: clipSource.audioCodec || undefined } : undefined;
+    const audioMetadata = clipSource.audioSampleRate ? { sampleRate: clipSource.audioSampleRate, channels: finalMetadata.audioChannels, codec: clipSource.audioCodec || undefined } : undefined;
 
     let manifest = loadManifestV3(workspace);
     const assetId = 'asset_video_001';
@@ -167,7 +170,7 @@ export async function importSource(workspacePath: string, filePath: string, opti
     project.status.imported = true;
     project.updatedAt = nowIso();
     saveProject(project);
-    saveManifestV3(workspace, manifest, { revision: false });
+    saveManifestV3(workspace, manifest);
     return project;
   } catch (err) {
     if (stage) rmSync(stage, { force: true });
@@ -180,8 +183,7 @@ export async function importSource(workspacePath: string, filePath: string, opti
 // workspaces, and the fix simply doesn't apply there.
 function manifestSourceChannel(workspace: string): 'left' | 'right' | undefined {
   try {
-    const manifest = loadManifestV3(workspace);
-    return manifest.audioChannelFix?.status === 'approved' ? manifest.audioChannelFix.sourceChannel : undefined;
+    return resolveChannelFixForAsset(loadManifestV3(workspace), 'input/source.mp4');
   } catch {
     return undefined;
   }
@@ -197,7 +199,7 @@ function monoDownmixArgs(sourceChannel: 'left' | 'right' | undefined, sourcePath
   if (!sourceChannel) return ['-ac', '1'];
   const channels = probeRecordingMedia(sourcePath).audio?.channels ?? 0;
   if (channels !== 2) return ['-ac', '1'];
-  return ['-af', `pan=mono|c0=${sourceChannel === 'left' ? 'c0' : 'c1'}`];
+  return ['-af', channelFixMonoPan(sourceChannel)];
 }
 
 export async function extractAudio(workspacePath: string, options: { format?: 'wav' | 'mp3'; sampleRate?: number; overwrite?: boolean; logJob?: boolean } = {}) {

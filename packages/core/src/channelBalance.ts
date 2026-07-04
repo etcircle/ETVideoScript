@@ -67,10 +67,10 @@ export function analyzeChannelBalance(mediaPath: string): ChannelBalance {
 }
 
 export type ChannelFixOutcome =
-  | { action: 'applied'; fix: AudioChannelFix; balance: ChannelBalance }
-  | { action: 'disabled'; fix: AudioChannelFix }
-  | { action: 'unchanged'; reason: string; fix?: AudioChannelFix }
-  | { action: 'none'; reason: string; balance: ChannelBalance };
+  | { action: 'applied'; fix: AudioChannelFix; balance: ChannelBalance; manifest: ManifestV3 }
+  | { action: 'disabled'; fix: AudioChannelFix; manifest: ManifestV3 }
+  | { action: 'unchanged'; reason: string; fix?: AudioChannelFix; manifest: ManifestV3 }
+  | { action: 'none'; reason: string; balance: ChannelBalance; manifest: ManifestV3 };
 
 // Backfills the base recording asset's probed channel count whenever a fix is applied.
 // buildRenderPlan's render-time guard trusts this field strictly (channels === 2); keeping
@@ -85,6 +85,20 @@ function withBaseAssetChannels(manifest: ManifestV3, channels: number): Manifest
         : asset
     )
   };
+}
+
+// Shared by the forced-channel and auto-detect apply paths: both approve the same
+// AudioChannelFix shape, backfill the base asset's channel count, and persist.
+function persistFix(workspace: string, manifest: ManifestV3, sourceChannel: 'left' | 'right', balance: ChannelBalance, auto: boolean): { fix: AudioChannelFix; manifest: ManifestV3 } {
+  const fix: AudioChannelFix = {
+    status: 'approved',
+    sourceChannel,
+    detection: { leftRmsDb: balance.leftRmsDb ?? 0, rightRmsDb: balance.rightRmsDb ?? 0, auto },
+    appliedAt: nowIso()
+  };
+  const nextManifest = withBaseAssetChannels({ ...manifest, audioChannelFix: fix }, balance.channels);
+  saveManifestV3(workspace, nextManifest);
+  return { fix, manifest: nextManifest };
 }
 
 /**
@@ -105,16 +119,17 @@ export function applyChannelFix(
   const existing = manifest.audioChannelFix;
 
   if (options.disable) {
-    if (!existing) return { action: 'unchanged', reason: 'no channel fix to disable' };
+    if (!existing) return { action: 'unchanged', reason: 'no channel fix to disable', manifest };
     // Same-value no-op (issue #9): re-disabling an already-disabled record must not bump
     // appliedAt — a churned timestamp with no actual value change would wrongly stale-out
     // a studioCleanup fingerprinted against the fix's VALUE, not this timestamp.
-    if (existing.status === 'disabled') return { action: 'unchanged', reason: 'already disabled', fix: existing };
+    if (existing.status === 'disabled') return { action: 'unchanged', reason: 'already disabled', fix: existing, manifest };
     // appliedAt tracks "created or last changed" (any status transition), not just creation —
     // extractFullBandReference's cache freshness check depends on it staying current.
     const fix: AudioChannelFix = { ...existing, status: 'disabled', appliedAt: nowIso() };
-    saveManifestV3(workspace, { ...manifest, audioChannelFix: fix });
-    return { action: 'disabled', fix };
+    const nextManifest = { ...manifest, audioChannelFix: fix };
+    saveManifestV3(workspace, nextManifest);
+    return { action: 'disabled', fix, manifest: nextManifest };
   }
 
   const source = assertInside(workspace, 'input/source.mp4');
@@ -128,15 +143,9 @@ export function applyChannelFix(
     // there is also nothing left to backfill — a legacy record with stale/missing asset
     // channel metadata still needs the write below (see withBaseAssetChannels/issue #7).
     const alreadyCorrect = existing?.status === 'approved' && existing.sourceChannel === options.channel && baseAsset?.audio?.channels === balance.channels;
-    if (alreadyCorrect) return { action: 'unchanged', reason: 'audioChannelFix already set to this channel', fix: existing! };
-    const fix: AudioChannelFix = {
-      status: 'approved',
-      sourceChannel: options.channel,
-      detection: { leftRmsDb: balance.leftRmsDb ?? 0, rightRmsDb: balance.rightRmsDb ?? 0, auto: false },
-      appliedAt: nowIso()
-    };
-    saveManifestV3(workspace, withBaseAssetChannels({ ...manifest, audioChannelFix: fix }, balance.channels));
-    return { action: 'applied', fix, balance };
+    if (alreadyCorrect) return { action: 'unchanged', reason: 'audioChannelFix already set to this channel', fix: existing!, manifest };
+    const persisted = persistFix(workspace, manifest, options.channel, balance, false);
+    return { action: 'applied', fix: persisted.fix, balance, manifest: persisted.manifest };
   }
 
   if (existing) {
@@ -146,25 +155,23 @@ export function applyChannelFix(
     // this early-return path is the one place a stale record would otherwise stay inert
     // forever (buildRenderPlan's channels===2 guard permanently rejects it). Best-effort:
     // never throw or block the early return on a probe failure.
+    let nextManifest = manifest;
     if (existing.status === 'approved') {
       const baseAsset = manifest.assets.find((asset) => asset.path === 'input/source.mp4');
       if (baseAsset?.audio?.channels !== 2) {
         try {
           const channels = probeRecordingMedia(source).audio?.channels ?? 0;
-          if (channels === 2) saveManifestV3(workspace, withBaseAssetChannels(manifest, channels));
+          if (channels === 2) {
+            nextManifest = withBaseAssetChannels(manifest, channels);
+            saveManifestV3(workspace, nextManifest);
+          }
         } catch { /* best-effort backfill only; auto mode must never throw here */ }
       }
     }
-    return { action: 'unchanged', reason: 'existing audioChannelFix preserved', fix: existing };
+    return { action: 'unchanged', reason: 'existing audioChannelFix preserved', fix: existing, manifest: nextManifest };
   }
   const balance = analyze(source);
-  if (!balance.recommendation) return { action: 'none', reason: 'channel balance does not indicate a single-channel recording', balance };
-  const fix: AudioChannelFix = {
-    status: 'approved',
-    sourceChannel: balance.recommendation,
-    detection: { leftRmsDb: balance.leftRmsDb ?? 0, rightRmsDb: balance.rightRmsDb ?? 0, auto: true },
-    appliedAt: nowIso()
-  };
-  saveManifestV3(workspace, withBaseAssetChannels({ ...manifest, audioChannelFix: fix }, balance.channels));
-  return { action: 'applied', fix, balance };
+  if (!balance.recommendation) return { action: 'none', reason: 'channel balance does not indicate a single-channel recording', balance, manifest };
+  const persisted = persistFix(workspace, manifest, balance.recommendation, balance, true);
+  return { action: 'applied', fix: persisted.fix, balance, manifest: persisted.manifest };
 }

@@ -8,10 +8,17 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, STUDIO_CLEANUP_STALE_WARNING, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
+// ChannelFixOutcome carries the resulting manifest for internal callers (e.g. reading
+// detachedClipIds without a redundant reload); it's not part of any CLI command's
+// printed JSON contract.
+function withoutManifest<T extends { manifest: unknown }>(outcome: T): Omit<T, 'manifest'> {
+  const { manifest: _manifest, ...rest } = outcome;
+  return rest;
+}
 type ExtractAudioCliOptions = { format: 'wav' | 'mp3'; sampleRate: string; clip?: string; yes?: boolean };
 type PeaksCliOptions = { resolution: string; clip?: string; all?: boolean };
 type RootCliOptions = { workspace?: string; json?: boolean };
@@ -42,7 +49,7 @@ export async function handleExtractAudioCommand(opts: ExtractAudioCliOptions, ro
   }
   const common = { format: opts.format, sampleRate: Number(opts.sampleRate), overwrite: Boolean(opts.yes) };
   const outputs = opts.clip ? [await deps.extractClipAudio(workspace, opts.clip, common)] : await deps.extractAllClipAudio(workspace, common);
-  deps.print(rootOpts.json ? { outputs, ...(channelFix && channelFix.action !== 'unchanged' ? { channelFix } : {}) } : `Audio ready: ${outputs.join(', ')}`, rootOpts.json);
+  deps.print(rootOpts.json ? { outputs, ...(channelFix && channelFix.action !== 'unchanged' ? { channelFix: withoutManifest(channelFix) } : {}) } : `Audio ready: ${outputs.join(', ')}`, rootOpts.json);
   return outputs;
 }
 
@@ -179,13 +186,13 @@ program.command('fix-channels').description('Detect/repair single-channel mic re
     // detached WAV is a separate derivative (assets/audio/<assetId>.wav) that only
     // detach-audio (with refresh:true) revisits (issue #4).
     const detachedClipIds = (outcome.action === 'applied' || outcome.action === 'disabled')
-      ? loadManifestV3(workspace).tracks.flatMap((track) => track.clips).filter((clip) => clip.audioDetached).map((clip) => clip.clipId)
+      ? outcome.manifest.tracks.flatMap((track) => track.clips).filter((clip) => clip.audioDetached).map((clip) => clip.clipId)
       : [];
     const refreshNote = detachedClipIds.length
       ? ` Clips with detached audio need a refresh: POST .../clips/<clipId>/detach-audio with {"refresh":true} for: ${detachedClipIds.join(', ')}.`
       : '';
     print(program.opts().json
-      ? { ...outcome, ...(detachedClipIds.length ? { detachedClipsNeedingRefresh: detachedClipIds } : {}) }
+      ? { ...withoutManifest(outcome), ...(detachedClipIds.length ? { detachedClipsNeedingRefresh: detachedClipIds } : {}) }
       : summary + refreshNote, program.opts().json);
   });
 
@@ -461,7 +468,7 @@ program.command('render').description('Render edited MP4 from manifest')
     }
     const plan = buildRenderPlanV3(manifest, loadTranscript(workspace) ?? undefined);
     if (plan.studioCleanupStale) {
-      console.warn('Studio cleanup predates the current channel-fix decision; rendering with raw (re-panned) audio instead of the cleaned asset. Re-run studio cleanup (paid) to restore noise removal for the corrected channel.');
+      console.warn(STUDIO_CLEANUP_STALE_WARNING);
     }
     const output = await renderPlanV3(workspace, plan, { output: opts.output ?? (opts.preset === 'youtube' ? 'renders/final.mp4' : 'renders/draft.mp4'), overwrite: Boolean(opts.yes) });
     print(program.opts().json ? { output, skipped: skipped.map((o) => o.id), ...(plan.studioCleanupStale ? { studioCleanupStale: true } : {}) } : `Rendered: ${output}`, program.opts().json);

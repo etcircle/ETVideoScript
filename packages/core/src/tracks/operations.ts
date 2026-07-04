@@ -2,14 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { addAsset } from '../assets/operations';
+import { addAsset, updateAsset } from '../assets/operations';
 import type { Asset } from '../assets/schema';
 import { assertInside, relativeToWorkspace } from '../filesystem';
 import { loadManifestV3, saveManifestV3 } from '../manifest/io';
 import type { ManifestV3 } from '../manifest/schema';
 import { validateManifestV3Document } from '../manifest/validate';
 import { probeRecordingMedia } from '../ffprobe';
-import { resolveChannelFixForAsset } from '../channelFixScope';
+import { channelFixStereoPan, resolveChannelFixForAsset } from '../channelFixScope';
 import { channelFixSidecarFresh, writeChannelFixSidecar } from '../channelFixSidecar';
 import type { Clip, Track } from './schema';
 
@@ -196,13 +196,17 @@ export function extractAudioAssetInWorkspace(workspacePath: string, manifest: Ma
   // a missing/extra channel (issue #7). Only probed when a fix is actually in scope here —
   // extraction with no fix must not require a real, ffprobe-readable source file.
   const channels = sourceChannel ? (probeRecordingMedia(sourcePath).audio?.channels ?? 0) : 0;
-  const panArgs = sourceChannel && channels === 2
-    ? ['-af', `pan=stereo|c0=${sourceChannel === 'left' ? 'c0' : 'c1'}|c1=${sourceChannel === 'left' ? 'c0' : 'c1'}`]
-    : [];
+  const panArgs = sourceChannel && channels === 2 ? ['-af', channelFixStereoPan(sourceChannel)] : [];
   const result = spawnSync(ffmpeg, ['-y', '-i', sourcePath, '-vn', ...panArgs, '-acodec', 'pcm_s16le', '-ar', '48000', '-ac', '2', outputPath], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`ffmpeg audio extraction failed: ${result.stderr || result.error?.message || 'unknown error'}`);
   writeChannelFixSidecar(outputPath, sourceChannel);
-  if (existing) return { manifest, asset: existing };
+  if (existing) {
+    // The bytes just re-extracted above track sourceAsset's CURRENT durationSec (e.g. after
+    // a source replace) — if that differs from the existing record, the manifest must be
+    // updated too, or it permanently misdescribes the derivative now on disk.
+    if (existing.durationSec === sourceAsset.durationSec) return { manifest, asset: existing };
+    return updateAsset(manifest, { assetId: existing.assetId, patch: { durationSec: sourceAsset.durationSec } });
+  }
   const asset: Asset = { assetId: `asset_audio_${sourceAsset.assetId}`, kind: 'audio', path: relativeToWorkspace(workspace, outputPath), durationSec: sourceAsset.durationSec, provenance: 'imported', audio: { sampleRate: 48000, channels: 2, codec: 'pcm_s16le' } };
   return addAsset(manifest, asset);
 }
