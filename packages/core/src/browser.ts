@@ -20,7 +20,7 @@ export { BRAND_PACKS, BrandPackSchema, BrandPackPreviewSchema, getBrandPack, isK
 export { setBrandPackId } from './brand-packs/operations';
 export { buildBaseTimeline, composeTimeMap, outputTime as outputTimeV3, sourceTimeAt, outputRangeForClipSourceSpan } from './timeMap/compose';
 export { type RenderStage, type OutputRange as RenderOutputRange, type OverlaySource, type Rect } from './render/types';
-export { buildRenderPlan as buildRenderPlanV3, type V3RenderPlan, type RenderProfile, type TrackComposition } from './render/plan';
+export { buildRenderPlan as buildRenderPlanV3, STUDIO_CLEANUP_STALE_WARNING, type V3RenderPlan, type RenderProfile, type TrackComposition } from './render/plan';
 export { projectCaptions as projectCaptionsV3, captionsToSrt as captionsToSrtV3, captionsToVtt as captionsToVttV3, type V3CaptionCue } from './captions/project';
 export { deriveEditedScriptFromTimeMap as deriveEditedScriptFromTimeMapV3, type V3EditedScript, type V3EditedScriptToken } from './transcript/edited-script';
 export { derivePreviewScriptFromTimeMap as derivePreviewScriptFromTimeMapV3, type V3PreviewScript, type V3PreviewScriptToken, type V3PreviewScriptWordToken, type V3PreviewScriptReplacementToken } from './transcript/preview-script';

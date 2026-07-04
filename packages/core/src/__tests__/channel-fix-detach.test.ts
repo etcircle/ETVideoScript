@@ -25,6 +25,20 @@ function channelRms(path: string): number[] {
   return parseAstatsChannelRms(result.stderr);
 }
 
+// Same one-sided fixture as makeOneSidedVideo, but with a configurable duration.
+function makeOneSidedVideoWithDuration(dir: string, name: string, durationSec: number): string {
+  const path = join(dir, name);
+  const result = spawnSync('ffmpeg', ['-y',
+    '-f', 'lavfi', '-i', `testsrc=duration=${durationSec}:size=320x240:rate=30`,
+    '-f', 'lavfi', '-i', `sine=frequency=440:duration=${durationSec}:sample_rate=48000`,
+    '-filter_complex', '[1:a]pan=stereo|c0=c0|c1=0*c0[a]',
+    '-map', '0:v', '-map', '[a]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', path
+  ], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`ffmpeg fixture failed: ${result.stderr}`);
+  return path;
+}
+
 describe('detaching audio honors audioChannelFix (issue #2)', () => {
   let dir: string;
   let workspace: string;
@@ -119,5 +133,34 @@ describe('detachAudioInWorkspace refresh flag revisits an already-detached clip 
     const freshRms = channelRms(join(workspace, after.asset.path));
     expect(Math.abs(freshRms[0]! - freshRms[1]!)).toBeLessThan(1);
     expect(freshRms[1]!).toBeGreaterThan(-60); // no longer dead
+  }, 60_000);
+});
+
+describe('extractAudioAssetInWorkspace keeps the manifest asset in sync with a re-extraction', () => {
+  let dir: string;
+  let workspace: string;
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'etv-chanfix-detach-duration-'));
+    workspace = join(dir, 'ws');
+    await createWorkspace({ workspacePath: workspace, projectId: 'chanfix-detach-duration', title: 'detach duration sync test' });
+  });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it('updates durationSec on the detached-audio asset record when a source replace forces a re-extraction', async () => {
+    await importSource(workspace, makeOneSidedVideoWithDuration(dir, 'short.mp4', 1));
+    const first = detachAudioInWorkspaceV3(workspace, { clipId: 'clip_001' });
+    expect(first.asset.durationSec).toBeCloseTo(1, 1);
+
+    await new Promise((r) => setTimeout(r, 10));
+    // Longer replacement: asset_video_001.durationSec grows, and promotion's renameSync
+    // bumps input/source.mp4's mtime past the existing derivative's, forcing a re-extract.
+    await importSource(workspace, makeOneSidedVideoWithDuration(dir, 'long.mp4', 2), { replace: true });
+
+    const second = detachAudioInWorkspaceV3(workspace, { clipId: 'clip_001', refresh: true });
+    expect(second.asset.assetId).toBe(first.asset.assetId);
+    // The re-extracted bytes now cover the full 2s recording — the manifest record must
+    // describe that, not the stale 1s duration captured at the original detach.
+    expect(second.asset.durationSec).toBeCloseTo(2, 1);
+    expect(second.manifest.assets.find((a) => a.assetId === second.asset.assetId)?.durationSec).toBeCloseTo(2, 1);
   }, 60_000);
 });

@@ -42,6 +42,7 @@ import {
   saveManifestV3,
   saveProject,
   ffprobeDurationSec,
+  STUDIO_CLEANUP_STALE_WARNING,
   ProviderRequestIdSchema,
   readProviderRegistry,
   readProviderRequests,
@@ -349,10 +350,6 @@ function updateManifestOperation(ws: string, operationId: string, patch: any) {
   return compatibilityAsset ? { ...operation, asset: compatibilityAsset } : operation;
 }
 
-async function renderDraft(ws: string, options: any = {}) {
-  return renderPlanV3(ws, buildRenderPlanV3(loadManifestV3(ws), loadTranscript(ws) ?? undefined), { output: options.output ?? 'renders/draft.mp4', overwrite: options.overwrite, onProgress: options.onProgress });
-}
-
 function exportCaptions(ws: string, options: { format?: 'srt' | 'vtt' } = {}) {
   const manifest = loadManifestV3(ws);
   const transcript = loadTranscript(ws);
@@ -506,10 +503,11 @@ export function createApp(config: ApiConfig = loadConfig()) {
           outputs = [String(await withProjectManifestMutex(projectId, async () => {
             const manifest = loadManifestV3(ws);
             const fingerprint = manifestFingerprint(ws, manifest.updatedAt);
-            if (buildRenderPlanV3(manifest).studioCleanupStale) {
-              warning = 'Studio cleanup predates the current channel-fix decision; rendered with raw (re-panned) audio instead of the cleaned asset. Re-run studio cleanup (paid) to restore noise removal for the corrected channel.';
+            const plan = buildRenderPlanV3(manifest, loadTranscript(ws) ?? undefined);
+            if (plan.studioCleanupStale) {
+              warning = STUDIO_CLEANUP_STALE_WARNING;
             }
-            const result = await renderDraft(ws, { preset: 'draft', overwrite: true, onProgress: (event: any) => {
+            const result = await renderPlanV3(ws, plan, { output: 'renders/draft.mp4', overwrite: true, onProgress: (event: any) => {
               if (cancelledJobs.has(jobId)) throw new Error('Render cancelled by user');
               const percent = Math.round(event.percent);
               if (percent === lastPercent) return;

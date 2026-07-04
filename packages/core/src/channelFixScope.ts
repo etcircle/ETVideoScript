@@ -23,3 +23,19 @@ export function resolveChannelFixForAsset(manifest: ManifestV3, assetPath: strin
 export function channelFixFingerprint(sourceChannel: 'left' | 'right' | undefined): string {
   return sourceChannel ?? 'none';
 }
+
+/** Fingerprint of the base recording's channel-fix state as it stands in `manifest` right now. */
+export function sourceChannelFixFingerprint(manifest: ManifestV3): string {
+  return channelFixFingerprint(resolveChannelFixForAsset(manifest, 'input/source.mp4'));
+}
+
+/** ffmpeg pan filter selecting only the live channel into a mono output. */
+export function channelFixMonoPan(sourceChannel: 'left' | 'right'): string {
+  return `pan=mono|c0=${sourceChannel === 'left' ? 'c0' : 'c1'}`;
+}
+
+/** ffmpeg pan filter duplicating the live channel to both stereo output channels. */
+export function channelFixStereoPan(sourceChannel: 'left' | 'right'): string {
+  const live = sourceChannel === 'left' ? 'c0' : 'c1';
+  return `pan=stereo|c0=${live}|c1=${live}`;
+}

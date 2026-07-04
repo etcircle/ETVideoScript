@@ -1,5 +1,5 @@
 import type { ManifestV3 } from '../manifest/schema';
-import { channelFixFingerprint, resolveChannelFixForAsset } from '../channelFixScope';
+import { resolveChannelFixForAsset, sourceChannelFixFingerprint } from '../channelFixScope';
 import { getOperationKind } from '../operations/registry';
 import type { RenderStage } from './types';
 import type { Clip, Track } from '../tracks/schema';
@@ -70,6 +70,9 @@ export interface V3RenderPlan {
    */
   audioSourceChannel?: 'left' | 'right';
 }
+
+/** User-facing warning when a render falls back off a stale studioCleanup (see studioCleanupStale above). */
+export const STUDIO_CLEANUP_STALE_WARNING = 'Studio cleanup predates the current channel-fix decision; this render uses raw (re-panned) audio instead of the cleaned asset. Re-run studio cleanup (paid) to restore noise removal for the corrected channel.';
 
 function assetById(manifest: ManifestV3): Map<string, Asset> {
   return new Map(manifest.assets.map((asset) => [asset.assetId, asset]));
@@ -229,7 +232,7 @@ export function buildRenderPlan(manifest: ManifestV3, transcript?: TranscriptWor
   // creation time; a MISSING fingerprint only counts as stale when an audioChannelFix
   // record actually exists to compare against — a cleanup + no channel-fix history at
   // all (the common case, and every pre-fingerprint-field manifest) is never stale.
-  const currentFixFingerprint = channelFixFingerprint(resolveChannelFixForAsset(manifest, 'input/source.mp4'));
+  const currentFixFingerprint = sourceChannelFixFingerprint(manifest);
   const studioCleanupStale =
     manifest.studioCleanup?.status === 'approved'
     && !!manifest.audioChannelFix
