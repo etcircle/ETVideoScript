@@ -1702,10 +1702,16 @@ describe('computeAlignment', () => {
   });
 
   it('detects orphan material as a distinct entry', () => {
+    // Pin clip_take_01 as reference: orphans only arise on NON-reference takes. Without this,
+    // auto-select ("most words") would pick clip_take_02 (it has the tangent, so it is longest),
+    // making the tangent part of the reference spans instead of an orphan. That auto-select
+    // behavior is intentional (a rambly take's extra material becomes selectable spans the agent
+    // prunes via the brief); this test specifically exercises orphan detection, which requires
+    // the tangent to live on a non-reference take.
     const artifact = scenario([
       { clipId: 'clip_take_01', assetId: 'a1', text: SENTENCE, dur: 30 },
       { clipId: 'clip_take_02', assetId: 'a2', text: 'Alpha beta gamma delta. brand new tangent nobody asked for at all here really. Epsilon zeta eta theta. Iota kappa lambda mu.', dur: 40 }
-    ]);
+    ], { kind: 'take', clipId: 'clip_take_01' });
     expect(artifact.orphans.length).toBeGreaterThanOrEqual(1);
     expect(artifact.orphans[0].orphanId).toBe('o001');
   });
