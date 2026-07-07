@@ -66,6 +66,7 @@ function fixtureManifest(durationSec: number): ManifestV3 {
         muted: false,
         solo: false,
         hidden: false,
+        role: 'timeline',
         clips: [{
           clipId: 'clip_001',
           assetId: 'asset_video_001',

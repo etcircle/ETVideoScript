@@ -17,7 +17,7 @@ async function workspace3() {
   saveManifestV3(workspace, {
     ...defaultManifest('p'),
     assets: clipSources.map((source) => ({ assetId: `asset_${source.clipId}`, kind: 'video' as const, path: source.path, durationSec: source.durationSec, provenance: 'imported' as const, video: { width: source.width, height: source.height, fps: source.fps }, audio: { sampleRate: source.audioSampleRate } })),
-    tracks: [{ trackId: 't', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: clipSources.map((source, index) => ({ clipId: source.clipId, assetId: `asset_${source.clipId}`, sourceStart: 0, sourceEnd: 4, timelineStart: index * 4 })) }]
+    tracks: [{ trackId: 't', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: clipSources.map((source, index) => ({ clipId: source.clipId, assetId: `asset_${source.clipId}`, sourceStart: 0, sourceEnd: 4, timelineStart: index * 4 })) }]
   }, { revision: false });
   return { root, workspace };
 }

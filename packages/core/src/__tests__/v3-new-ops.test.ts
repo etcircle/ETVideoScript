@@ -49,14 +49,14 @@ function manifest(operations: ManifestV3['operations'] = []): ManifestV3 {
       { assetId: 'asset_overlay_001', kind: 'image', path: 'assets/images/logo.png', durationSec: 1, provenance: 'imported' }
     ],
     tracks: [
-      { trackId: 'track_video_001', kind: 'video', name: 'Video', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [
+      { trackId: 'track_video_001', kind: 'video', name: 'Video', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
         { clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 10, timelineStart: 0 },
         { clipId: 'clip_002', assetId: 'asset_video_002', sourceStart: 0, sourceEnd: 4, timelineStart: 10 }
       ] },
-      { trackId: 'track_video_002', kind: 'video', name: 'Other', order: 1, locked: false, muted: false, solo: false, hidden: false, clips: [
+      { trackId: 'track_video_002', kind: 'video', name: 'Other', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
         { clipId: 'clip_other', assetId: 'asset_video_002', sourceStart: 0, sourceEnd: 4, timelineStart: 0 }
       ] },
-      { trackId: 'track_caption_001', kind: 'caption', name: 'Captions', order: 10, locked: false, muted: false, solo: false, hidden: false, clips: [] }
+      { trackId: 'track_caption_001', kind: 'caption', name: 'Captions', order: 10, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [] }
     ],
     operations,
     outputs: [{ outputId: 'output_full_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],

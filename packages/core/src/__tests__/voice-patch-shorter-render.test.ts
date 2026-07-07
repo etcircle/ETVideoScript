@@ -108,7 +108,7 @@ function fixtureManifest(operations: ManifestV3['operations']): ManifestV3 {
       { assetId: 'asset_voice_001', kind: 'audio', path: 'assets/voice/tone-c.wav', durationSec: 0.4, provenance: 'generated', audio: { sampleRate: 48000 } }
     ],
     tracks: [
-      { trackId: 'track_video_001', kind: 'video', name: 'Base', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 6, timelineStart: 0 }] }
+      { trackId: 'track_video_001', kind: 'video', name: 'Base', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 6, timelineStart: 0 }] }
     ],
     operations,
     outputs: [{ outputId: 'output_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],

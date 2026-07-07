@@ -35,6 +35,7 @@ export const TrackSchema = z.object({
   muted: z.boolean().default(false),
   solo: z.boolean().default(false),
   hidden: z.boolean().default(false),
+  role: z.enum(['timeline', 'staging']).default('timeline'),
   fx: TrackFxSchema.optional(),
   clips: z.array(ClipSchema)
 }).superRefine((track, ctx) => {

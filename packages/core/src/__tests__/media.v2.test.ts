@@ -21,7 +21,7 @@ describe('media v3', () => {
       saveManifestV3(workspace, {
         ...defaultManifest('p'),
         assets: [{ assetId: 'asset_video_001', kind: 'video', path: sourceRel, durationSec: 0.2, provenance: 'imported', video: { width: 16, height: 16, fps: 25, codec: 'h264', pixelFormat: 'yuv420p' }, audio: { sampleRate: 16000, codec: 'aac' } }],
-        tracks: [{ trackId: 't', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 0.2, timelineStart: 0 }] }]
+        tracks: [{ trackId: 't', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 0.2, timelineStart: 0 }] }]
       }, { revision: false });
       const output = await extractClipAudio(workspace, 'clip_001', { logJob: false });
       expect(output).toBe('media/clip_001/extracted-audio.wav');

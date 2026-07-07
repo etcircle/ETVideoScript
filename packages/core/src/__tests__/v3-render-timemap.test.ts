@@ -42,9 +42,9 @@ function manifest(operations: ManifestV3['operations'] = []): ManifestV3 {
       { assetId: 'asset_voice_001', kind: 'audio', path: 'assets/voice/patch.wav', durationSec: 1, provenance: 'generated', audio: { sampleRate: 48000 } }
     ],
     tracks: [
-      { trackId: 'track_video_001', kind: 'video', name: 'Base video', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 2, sourceEnd: 12, timelineStart: 0 }] },
-      { trackId: 'track_video_002', kind: 'video', name: 'Top video', order: 10, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_top', assetId: 'asset_video_002', sourceStart: 0, sourceEnd: 4, timelineStart: 3, audioDetached: true }] },
-      { trackId: 'track_audio_001', kind: 'audio', subtype: 'music', name: 'Music', order: 1, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_music', assetId: 'asset_music_001', sourceStart: 0, sourceEnd: 12, timelineStart: 0 }] }
+      { trackId: 'track_video_001', kind: 'video', name: 'Base video', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 2, sourceEnd: 12, timelineStart: 0 }] },
+      { trackId: 'track_video_002', kind: 'video', name: 'Top video', order: 10, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_top', assetId: 'asset_video_002', sourceStart: 0, sourceEnd: 4, timelineStart: 3, audioDetached: true }] },
+      { trackId: 'track_audio_001', kind: 'audio', subtype: 'music', name: 'Music', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_music', assetId: 'asset_music_001', sourceStart: 0, sourceEnd: 12, timelineStart: 0 }] }
     ],
     operations,
     outputs: [{ outputId: 'output_full_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],

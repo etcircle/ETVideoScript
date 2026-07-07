@@ -18,7 +18,7 @@ function manifest(projectId: string): ManifestV3 {
       { assetId: 'asset_video_001', kind: 'video', path: 'assets/video/clip_001/source.mp4', durationSec: 10, provenance: 'imported', video: { width: 640, height: 360, fps: 30 }, audio: { sampleRate: 48000 } },
       { assetId: 'asset_video_002', kind: 'video', path: 'assets/video/clip_002/source.mp4', durationSec: 10, provenance: 'imported', video: { width: 640, height: 360, fps: 30 }, audio: { sampleRate: 48000 } }
     ],
-    tracks: [{ trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [
+    tracks: [{ trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
       { clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 10, timelineStart: 0 },
       { clipId: 'clip_002', assetId: 'asset_video_002', sourceStart: 0, sourceEnd: 10, timelineStart: 10 }
     ] }],

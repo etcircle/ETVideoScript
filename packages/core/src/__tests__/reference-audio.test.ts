@@ -29,7 +29,7 @@ function fixtureManifest(durationSec: number): ManifestV3 {
       { assetId: 'asset_video_001', kind: 'video', path: 'input/source.mp4', durationSec, provenance: 'imported', video: { width: 160, height: 90, fps: 30 }, audio: { sampleRate: 48000 } }
     ],
     tracks: [
-      { trackId: 'track_video_001', kind: 'video', name: 'Base', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: durationSec, timelineStart: 0 }] }
+      { trackId: 'track_video_001', kind: 'video', name: 'Base', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: durationSec, timelineStart: 0 }] }
     ],
     operations: [],
     outputs: [{ outputId: 'output_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],

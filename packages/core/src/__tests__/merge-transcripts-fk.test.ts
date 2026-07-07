@@ -55,6 +55,7 @@ function makeManifest(): ManifestV3 {
         kind: 'video',
         name: 'Video 1',
         order: 0,
+        role: 'timeline',
         locked: false,
         muted: false,
         solo: false,

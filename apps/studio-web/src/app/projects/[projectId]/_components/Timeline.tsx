@@ -763,6 +763,7 @@ export function Timeline() {
       muted: false,
       solo: false,
       hidden: false,
+      role: 'timeline',
       fx: { enhance: false, denoise: false, dereverb: false }
     });
   }

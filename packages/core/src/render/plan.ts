@@ -212,7 +212,7 @@ export function buildRenderPlan(manifest: ManifestV3, transcript?: TranscriptWor
   // single distinct video source; otherwise leave the original audio (cleanup inert).
   const videoSourceIds = new Set(
     manifest.tracks
-      .filter((t) => t.kind === 'video')
+      .filter((t) => t.kind === 'video' && t.role !== 'staging')
       .flatMap((t) => (t.clips ?? []).map((c) => c.assetId))
   );
 

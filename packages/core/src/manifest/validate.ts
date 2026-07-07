@@ -162,6 +162,12 @@ export function validateManifestV3Document(input: unknown, ctx: ManifestV3Valida
     }
   }
 
+  const stagingTracks = manifest.tracks.filter((track) => track.role === 'staging');
+  if (stagingTracks.length > 1) errors.push(`Manifest may have at most one staging track, found ${stagingTracks.length}`);
+  for (const track of stagingTracks) {
+    if (track.kind !== 'video') errors.push(`${track.trackId}: staging track must be a video track`);
+  }
+
   errors.push(...validateOperationOverlaps(manifest.operations));
   return { valid: errors.length === 0, errors, warnings };
 }

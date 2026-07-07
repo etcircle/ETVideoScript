@@ -222,8 +222,8 @@ describe('media provider wave 2', () => {
         ...defaultManifest('p'),
         assets: [{ assetId: 'asset_primary', kind: 'video', path: 'primary.mp4', durationSec: 4, provenance: 'imported', video: { width: 1, height: 1, fps: 30 }, audio: { sampleRate: 16000 } }],
         tracks: [
-          { trackId: 'empty', kind: 'video', name: 'Empty', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [] },
-          { trackId: 'primary-track', kind: 'video', name: 'Primary', order: 1, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'primary', assetId: 'asset_primary', sourceStart: 0, sourceEnd: 4, timelineStart: 0 }] }
+          { trackId: 'empty', kind: 'video', name: 'Empty', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [] },
+          { trackId: 'primary-track', kind: 'video', name: 'Primary', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'primary', assetId: 'asset_primary', sourceStart: 0, sourceEnd: 4, timelineStart: 0 }] }
         ]
       }, { revision: false });
       await transcribeAudio(workspace, { provider: 'mock', clipId: 'primary', mockText: 'hello primary', etvsDir: isolatedEtvsDir(root) });

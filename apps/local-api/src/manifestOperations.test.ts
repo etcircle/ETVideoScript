@@ -21,11 +21,11 @@ async function createProject(root: string) {
     ...defaultManifest('episode-001'),
     assets: [{ assetId: 'asset_video_001', kind: 'video', path: 'input/source.mp4', durationSec: 30, provenance: 'imported', video: { width: 1920, height: 1080, fps: 30, codec: 'h264', pixelFormat: 'yuv420p' }, audio: { sampleRate: 48000, codec: 'aac' } }],
     tracks: [
-      { trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [
+      { trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
         { clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 10, timelineStart: 0 },
         { clipId: 'clip_002', assetId: 'asset_video_001', sourceStart: 10, sourceEnd: 20, timelineStart: 10 }
       ] },
-      { trackId: 'track_caption_001', kind: 'caption', name: 'Captions', order: 1, locked: false, muted: false, solo: false, hidden: false, clips: [] }
+      { trackId: 'track_caption_001', kind: 'caption', name: 'Captions', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [] }
     ]
   }, { revision: false });
   writeTranscript(workspace, wordsFromPlainText('hello world this is a clip', 6));

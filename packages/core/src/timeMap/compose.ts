@@ -9,7 +9,8 @@ export { outputRangeForClipSourceSpan, outputTime } from './project';
 const EPSILON = 1e-9;
 
 export function buildBaseTimeline(tracks: Track[]): TimeMap {
-  const segments = tracks.flatMap((track) => track.clips.map((clip) => {
+  const renderable = tracks.filter((track) => track.role !== 'staging');
+  const segments = renderable.flatMap((track) => track.clips.map((clip) => {
     const duration = clip.sourceEnd - clip.sourceStart;
     return {
       trackId: track.trackId,

@@ -72,6 +72,7 @@ const AddTrackParamsSchema = z.object({
   muted: z.boolean().default(false),
   solo: z.boolean().default(false),
   hidden: z.boolean().default(false),
+  role: z.enum(['timeline', 'staging']).default('timeline'),
   fx: z.object({ enhance: z.boolean().default(false), denoise: z.boolean().default(false), dereverb: z.boolean().default(false) }).optional(),
   clips: z.array(ClipSchema).optional()
 });

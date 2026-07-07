@@ -122,7 +122,7 @@ function nextOrder(manifest: ManifestV3): number {
 function ensureDialogTrack(manifest: ManifestV3): { manifest: ManifestV3; track: Track } {
   const existing = manifest.tracks.find((track) => track.kind === 'audio' && track.subtype === 'dialog');
   if (existing) return { manifest, track: existing };
-  const track: Track = { trackId: `track_audio_dialog_${randomUUID()}`, kind: 'audio', subtype: 'dialog', name: 'Dialog', order: nextOrder(manifest), locked: false, muted: false, solo: false, hidden: false, clips: [] };
+  const track: Track = { trackId: `track_audio_dialog_${randomUUID()}`, kind: 'audio', subtype: 'dialog', name: 'Dialog', order: nextOrder(manifest), locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [] };
   return { manifest: { ...manifest, tracks: [...manifest.tracks, track] }, track };
 }
 

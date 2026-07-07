@@ -8,7 +8,7 @@ const manifest: ManifestV3 = {
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
   assets: [],
-  tracks: [{ trackId: 'v1', kind: 'video', name: 'V1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [
+  tracks: [{ trackId: 'v1', kind: 'video', name: 'V1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
     { clipId: 'c1', assetId: 'a1', sourceStart: 10, sourceEnd: 20, timelineStart: 0 },
     { clipId: 'c2', assetId: 'a1', sourceStart: 0, sourceEnd: 8, timelineStart: 10 }
   ] }],
@@ -40,7 +40,7 @@ describe('edit target helpers', () => {
     const multiTrack: ManifestV3 = {
       ...manifest,
       tracks: [
-        { trackId: 'a1', kind: 'audio', name: 'A1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'a-clip', assetId: 'a1', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] },
+        { trackId: 'a1', kind: 'audio', name: 'A1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'a-clip', assetId: 'a1', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] },
         manifest.tracks[0]!
       ]
     };
@@ -53,7 +53,7 @@ describe('edit target helpers', () => {
     const multiTrack: ManifestV3 = {
       ...manifest,
       tracks: [
-        { trackId: 'a1', kind: 'audio', name: 'A1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [
+        { trackId: 'a1', kind: 'audio', name: 'A1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
           { clipId: 'a1c1', assetId: 'a1', sourceStart: 0, sourceEnd: 10, timelineStart: 0 },
           { clipId: 'a1c2', assetId: 'a1', sourceStart: 0, sourceEnd: 5, timelineStart: 10 }
         ] },
@@ -69,8 +69,8 @@ describe('edit target helpers', () => {
       ...manifest,
       tracks: [
         manifest.tracks[0]!,
-        { trackId: 'a1', kind: 'audio', name: 'A1', order: 1, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'a-clip', assetId: 'a1', sourceStart: 0, sourceEnd: 18, timelineStart: 0 }] },
-        { trackId: 'cap1', kind: 'caption', name: 'Captions', order: 2, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'cap-clip', assetId: 'a1', sourceStart: 0, sourceEnd: 18, timelineStart: 0 }] }
+        { trackId: 'a1', kind: 'audio', name: 'A1', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'a-clip', assetId: 'a1', sourceStart: 0, sourceEnd: 18, timelineStart: 0 }] },
+        { trackId: 'cap1', kind: 'caption', name: 'Captions', order: 2, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'cap-clip', assetId: 'a1', sourceStart: 0, sourceEnd: 18, timelineStart: 0 }] }
       ]
     };
     expect(clipSpanTargetsForWords(multiTrack, [

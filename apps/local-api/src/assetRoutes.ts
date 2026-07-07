@@ -121,7 +121,7 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
       if (!manifest.assets.some((asset: any) => asset.assetId === assetId)) manifest = addAssetV3(manifest, { assetId, kind: 'video', path: sourceRel, durationSec: metadata.durationSec, provenance: 'imported', video: { width: metadata.width, height: metadata.height, fps: metadata.fps, codec: metadata.videoCodec || undefined, pixelFormat: metadata.pixelFormat || undefined }, audio: metadata.audioSampleRate ? { sampleRate: metadata.audioSampleRate, codec: metadata.audioCodec || undefined } : undefined }).manifest;
       let videoTrack = manifest.tracks.find((track: any) => track.kind === 'video') ?? manifest.tracks[0];
       if (!videoTrack) {
-        const added = addTrackV3(manifest, { trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false });
+        const added = addTrackV3(manifest, { trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' });
         manifest = added.manifest;
         videoTrack = added.track;
       }
@@ -166,8 +166,8 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
       if (!targetTrack) {
         const order = Math.max(-1, ...manifest.tracks.map((track: any) => Number(track.order || 0))) + 1;
         const added = kind === 'video'
-          ? addTrackV3(manifest, { trackId: 'track_video_001', kind: 'video', name: 'Video 1', order, locked: false, muted: false, solo: false, hidden: false })
-          : addTrackV3(manifest, { trackId: 'track_audio_voiceover_001', kind: 'audio', subtype: 'voiceover', name: 'Voiceover', order, locked: false, muted: false, solo: false, hidden: false });
+          ? addTrackV3(manifest, { trackId: 'track_video_001', kind: 'video', name: 'Video 1', order, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' })
+          : addTrackV3(manifest, { trackId: 'track_audio_voiceover_001', kind: 'audio', subtype: 'voiceover', name: 'Voiceover', order, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' });
         manifest = added.manifest;
         targetTrack = added.track;
       }

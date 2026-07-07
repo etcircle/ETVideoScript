@@ -39,7 +39,7 @@ function manifest(): ManifestV3 {
       { assetId: 'asset_video', kind: 'video', path: 'input/source.mp4', durationSec: 20, provenance: 'imported', video: { width: 1280, height: 720, fps: 30 }, audio: { sampleRate: 48000 } },
       { assetId: 'asset_audio', kind: 'audio', path: 'assets/audio/source.wav', durationSec: 20, provenance: 'imported', audio: { sampleRate: 48000 } }
     ],
-    tracks: [{ trackId: 'track_video', kind: 'video', name: 'Video', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_1', assetId: 'asset_video', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] }],
+    tracks: [{ trackId: 'track_video', kind: 'video', name: 'Video', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_1', assetId: 'asset_video', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] }],
     operations: [],
     outputs: [{ outputId: 'output_full', kind: 'full', aspects: ['16:9'], status: 'manual' }],
     renderPresets: presets
@@ -74,7 +74,7 @@ describe('v3 manifest io', () => {
 describe('v3 structural and asset operations', () => {
   it('edits tracks and clips directly with validation', () => {
     let m = manifest();
-    m = addTrackV3(m, { trackId: 'track_music', kind: 'audio', subtype: 'music', name: 'Music', order: 1, locked: false, muted: false, solo: false, hidden: false }).manifest;
+    m = addTrackV3(m, { trackId: 'track_music', kind: 'audio', subtype: 'music', name: 'Music', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' }).manifest;
     m = renameTrackV3(m, { trackId: 'track_music', name: 'Bed' }).manifest;
     m = setTrackFlagsV3(m, { trackId: 'track_music', muted: true }).manifest;
     m = reorderTracksV3(m, { order: [{ trackId: 'track_music', order: 10 }] }).manifest;
@@ -99,7 +99,7 @@ describe('v3 structural and asset operations', () => {
 
   it('rejects duplicate and missing ids on structural ops', () => {
     const m = manifest();
-    expect(() => addTrackV3(m, { trackId: 'track_video', kind: 'video', name: 'Duplicate', order: 1, locked: false, muted: false, solo: false, hidden: false })).toThrow('Track already exists');
+    expect(() => addTrackV3(m, { trackId: 'track_video', kind: 'video', name: 'Duplicate', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' })).toThrow('Track already exists');
     expect(() => renameTrackV3(m, { trackId: 'track_missing', name: 'Missing' })).toThrow('Track not found');
     expect(() => addClipV3(m, { trackId: 'track_video', clip: { clipId: 'clip_1', assetId: 'asset_video', sourceStart: 0, sourceEnd: 1, timelineStart: 0 } })).toThrow('Clip already exists');
     expect(() => moveClipV3(m, { clipId: 'clip_missing', timelineStart: 1 })).toThrow('Clip not found');
@@ -119,13 +119,13 @@ describe('v3 structural and asset operations', () => {
   });
 
   it('rejects detachAudio for non-video source clips', () => {
-    let m = addTrackV3(manifest(), { trackId: 'track_dialog', kind: 'audio', subtype: 'dialog', name: 'Dialog', order: 1, locked: false, muted: false, solo: false, hidden: false }).manifest;
+    let m = addTrackV3(manifest(), { trackId: 'track_dialog', kind: 'audio', subtype: 'dialog', name: 'Dialog', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' }).manifest;
     m = addClipV3(m, { trackId: 'track_dialog', clip: { clipId: 'clip_dialog', assetId: 'asset_audio', sourceStart: 0, sourceEnd: 1, timelineStart: 0 } }).manifest;
     expect(() => detachAudioV3(m, { clipId: 'clip_dialog', assetId: 'asset_audio', detachedClipId: 'clip_detached' })).toThrow('Cannot detach audio: source clip clip_dialog is not on a video track');
   });
 
   it('rejects detachAudio for video assets placed on audio tracks', () => {
-    let m = addTrackV3(manifest(), { trackId: 'track_dialog', kind: 'audio', subtype: 'dialog', name: 'Dialog', order: 1, locked: false, muted: false, solo: false, hidden: false }).manifest;
+    let m = addTrackV3(manifest(), { trackId: 'track_dialog', kind: 'audio', subtype: 'dialog', name: 'Dialog', order: 1, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' }).manifest;
     m = addClipV3(m, { trackId: 'track_dialog', clip: { clipId: 'clip_video_on_audio', assetId: 'asset_video', sourceStart: 0, sourceEnd: 1, timelineStart: 0 } }).manifest;
     expect(() => detachAudioV3(m, { clipId: 'clip_video_on_audio', assetId: 'asset_audio', detachedClipId: 'clip_detached' })).toThrow('Cannot detach audio: source clip clip_video_on_audio is not on a video track');
   });

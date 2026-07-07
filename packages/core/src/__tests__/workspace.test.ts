@@ -9,7 +9,7 @@ function manifestWithClip(projectId: string, durationSec = 10): ManifestV3 {
   return {
     ...defaultManifest(projectId),
     assets: [{ assetId: 'asset_video_001', kind: 'video', path: 'input/source.mp4', durationSec, provenance: 'imported', video: { width: 640, height: 360, fps: 30 }, audio: { sampleRate: 48000 } }],
-    tracks: [{ trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: durationSec, timelineStart: 0 }] }]
+    tracks: [{ trackId: 'track_video_001', kind: 'video', name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: durationSec, timelineStart: 0 }] }]
   };
 }
 

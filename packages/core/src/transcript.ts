@@ -223,18 +223,27 @@ function whisperAuthorizationHeader(env: Record<string, string | undefined>): st
 }
 
 export function primaryVideoClips(manifest: ManifestV3): Array<{ clipId: string }> {
-  const track = manifest.tracks.find((candidate) => candidate.kind === 'video' && candidate.clips.length > 0) ?? manifest.tracks.find((candidate) => candidate.kind === 'video') ?? manifest.tracks[0];
+  const timelineVideo = manifest.tracks.filter((t) => t.kind === 'video' && t.role !== 'staging');
+  const track = timelineVideo.find((t) => t.clips.length > 0) ?? timelineVideo[0] ?? manifest.tracks.find((t) => t.role !== 'staging');
   return (track?.clips ?? []).flatMap((clip) => clip.clipId ? [{ clipId: clip.clipId }] : []);
 }
 
 export function transcribableClips(manifest: ManifestV3): Array<{ clipId: string }> {
-  const videoTrack = manifest.tracks.find((track) => track.kind === 'video' && track.clips.length > 0) ?? manifest.tracks.find((track) => track.kind === 'video');
-  const voiceoverTracks = manifest.tracks.filter((track) => track.kind === 'audio' && track.subtype === 'voiceover');
+  const timelineVideo = manifest.tracks.filter((t) => t.kind === 'video' && t.role !== 'staging');
+  const videoTrack = timelineVideo.find((t) => t.clips.length > 0) ?? timelineVideo[0];
+  const stagingTracks = manifest.tracks.filter((t) => t.role === 'staging');
+  const voiceoverTracks = manifest.tracks.filter((t) => t.kind === 'audio' && t.subtype === 'voiceover');
   const seen = new Set<string>();
-  return [videoTrack, ...voiceoverTracks]
+  // Timeline video + voiceover clips are merged in chronological (timelineStart) order,
+  // as consumed by mergeTranscripts to assemble the final transcript. Staging clips have
+  // no meaningful timelineStart (they are not part of the timeline), so they are appended
+  // afterward in track/import order rather than folded into the chronological sort.
+  const chronological = [videoTrack, ...voiceoverTracks]
     .flatMap((track) => (track?.clips ?? []).map((clip) => ({ clipId: clip.clipId, timelineStart: clip.timelineStart, order: track?.order ?? 0 })))
+    .sort((a, b) => a.timelineStart - b.timelineStart || a.order - b.order);
+  const staging = stagingTracks.flatMap((track) => track.clips.map((clip) => ({ clipId: clip.clipId })));
+  return [...chronological, ...staging]
     .filter((clip) => clip.clipId)
-    .sort((a, b) => a.timelineStart - b.timelineStart || a.order - b.order)
     .filter((clip) => {
       if (seen.has(clip.clipId)) return false;
       seen.add(clip.clipId);
