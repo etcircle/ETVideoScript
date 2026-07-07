@@ -515,7 +515,7 @@ const briefCommand = program.command('brief').description('Manage the project br
 briefCommand.command('init').description('Write a brief.md template to fill in')
   .action(() => takesCliAction(program.opts().json, () => {
     const workspace = workspaceOption(program.opts().workspace);
-    const target = join(workspace, 'brief.md');
+    const target = assertInside(workspace, 'brief.md');
     if (existsSync(target)) throw new TakesError('BRIEF_INVALID', 'brief.md already exists; edit it directly or use `ets brief set --file --force`');
     writeFileSync(target, briefTemplate());
     print(program.opts().json ? { path: target } : `Brief template written: ${target}`, program.opts().json);
@@ -525,9 +525,10 @@ briefCommand.command('set').description('Validate and install a brief file as br
   .option('--force', 'overwrite an existing brief.md')
   .action((opts) => takesCliAction(program.opts().json, () => {
     const workspace = workspaceOption(program.opts().workspace);
-    if (existsSync(join(workspace, 'brief.md')) && !opts.force) throw new TakesError('BRIEF_INVALID', 'brief.md already exists; pass --force to replace it');
+    const target = assertInside(workspace, 'brief.md');
+    if (existsSync(target) && !opts.force) throw new TakesError('BRIEF_INVALID', 'brief.md already exists; pass --force to replace it');
     const raw = readFileSync(resolve(opts.file), 'utf8');
-    writeFileSync(join(workspace, 'brief.md'), raw);
+    writeFileSync(target, raw);
     const brief = readBrief(workspace); // validates; throws (and leaves file for inspection) if invalid
     print(program.opts().json ? { frontmatter: brief.frontmatter } : `Brief set: ${brief.frontmatter.title}`, program.opts().json);
   }));
