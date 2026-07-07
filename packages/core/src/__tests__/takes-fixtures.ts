@@ -25,3 +25,27 @@ export function makeManifest(partial: Partial<ManifestV3> = {}): ManifestV3 {
 export function makeVideoAsset(assetId: string, durationSec: number, path = `input/takes/${assetId}.mp4`) {
   return { assetId, kind: 'video' as const, path, durationSec, provenance: 'imported' as const, video: { width: 1920, height: 1080, fps: 30 }, audio: { sampleRate: 48000, channels: 2 } };
 }
+
+import type { TranscriptWord } from '../schemas';
+
+export interface MakeWordsOptions {
+  clipId?: string;
+  startAt?: number;
+  wordSec?: number;              // duration of each word, default 0.3
+  gapSec?: number;               // gap after each word, default 0.05
+  gapsAfter?: Record<number, number>; // extra gap AFTER word index i (overrides gapSec for that slot)
+}
+
+export function makeWords(text: string, opts: MakeWordsOptions = {}): TranscriptWord[] {
+  const { clipId = 'clip_take_01', startAt = 0, wordSec = 0.3, gapSec = 0.05, gapsAfter = {} } = opts;
+  let t = startAt;
+  return text.split(/\s+/).filter(Boolean).map((token, i) => {
+    const start = t;
+    const end = start + wordSec;
+    t = end + (gapsAfter[i] ?? gapSec);
+    return {
+      id: `${clipId}_w${i}`, text: token, normalized: '', start, end,
+      speaker: 'speaker_1', confidence: 1, segmentId: `${clipId}_s1`, clipId
+    };
+  });
+}
