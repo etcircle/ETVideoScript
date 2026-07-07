@@ -21,6 +21,7 @@ function withoutManifest<T extends { manifest: unknown }>(outcome: T): Omit<T, '
 }
 type ExtractAudioCliOptions = { format: 'wav' | 'mp3'; sampleRate: string; clip?: string; yes?: boolean };
 type PeaksCliOptions = { resolution: string; clip?: string; all?: boolean };
+type FixChannelsCliOptions = { channel?: string; disable?: boolean; detectOnly?: boolean };
 type RootCliOptions = { workspace?: string; json?: boolean };
 export type CliHandlerDeps = {
   extractClipAudio: typeof extractClipAudio;
@@ -28,9 +29,10 @@ export type CliHandlerDeps = {
   extractClipWaveformPeaks: typeof extractClipWaveformPeaks;
   extractAllClipWaveformPeaks: typeof extractAllClipWaveformPeaks;
   applyChannelFix: typeof applyChannelFix;
+  analyzeChannelBalance: typeof analyzeChannelBalance;
   print: typeof print;
 };
-const defaultCliDeps: CliHandlerDeps = { extractClipAudio, extractAllClipAudio, extractClipWaveformPeaks, extractAllClipWaveformPeaks, applyChannelFix, print };
+const defaultCliDeps: CliHandlerDeps = { extractClipAudio, extractAllClipAudio, extractClipWaveformPeaks, extractAllClipWaveformPeaks, applyChannelFix, analyzeChannelBalance, print };
 
 export async function handleExtractAudioCommand(opts: ExtractAudioCliOptions, rootOpts: RootCliOptions = {}, deps: CliHandlerDeps = defaultCliDeps) {
   const workspace = workspaceOption(rootOpts.workspace);
@@ -164,36 +166,41 @@ program.command('peaks').description('Regenerate waveform peaks')
     handlePeaksCommand(opts, program.opts());
   });
 
+export function handleFixChannelsCommand(opts: FixChannelsCliOptions, rootOpts: RootCliOptions = {}, deps: CliHandlerDeps = defaultCliDeps) {
+  const workspace = workspaceOption(rootOpts.workspace);
+  if (opts.channel && !['left', 'right'].includes(opts.channel)) throw new Error('--channel must be left or right');
+  if (opts.detectOnly) {
+    const balance = deps.analyzeChannelBalance(resolve(workspace, 'input/source.mp4'));
+    deps.print(rootOpts.json ? balance : `channels: ${balance.channels}\nleft RMS: ${balance.leftRmsDb?.toFixed(1) ?? 'n/a'} dB\nright RMS: ${balance.rightRmsDb?.toFixed(1) ?? 'n/a'} dB\nrecommendation: ${balance.recommendation ?? 'none (balanced or non-stereo)'}`, rootOpts.json);
+    return balance;
+  }
+  const outcome = deps.applyChannelFix(workspace, { channel: opts.channel as 'left' | 'right' | undefined, disable: Boolean(opts.disable) });
+  const summary = outcome.action === 'applied'
+    ? `Channel fix applied: ${outcome.fix.sourceChannel} (auto: ${outcome.fix.detection.auto}). Re-run "ets extract-audio --yes" and "ets transcribe" to refresh derived audio.`
+    : outcome.action === 'disabled' ? 'Channel fix disabled (record kept). Re-run "ets extract-audio --yes" to restore averaged extraction.'
+    : outcome.action === 'unchanged' ? `No change: ${outcome.reason}`
+    : `No fix needed: ${outcome.reason}`;
+  // Already-detached clips don't refresh through extract-audio/transcribe — the
+  // detached WAV is a separate derivative (assets/audio/<assetId>.wav) that only
+  // detach-audio (with refresh:true) revisits (issue #4).
+  const detachedClipIds = (outcome.action === 'applied' || outcome.action === 'disabled')
+    ? outcome.manifest.tracks.flatMap((track) => track.clips).filter((clip) => clip.audioDetached).map((clip) => clip.clipId)
+    : [];
+  const refreshNote = detachedClipIds.length
+    ? ` Clips with detached audio need a refresh: POST .../clips/<clipId>/detach-audio with {"refresh":true} for: ${detachedClipIds.join(', ')}.`
+    : '';
+  deps.print(rootOpts.json
+    ? { ...withoutManifest(outcome), ...(detachedClipIds.length ? { detachedClipsNeedingRefresh: detachedClipIds } : {}) }
+    : summary + refreshNote, rootOpts.json);
+  return outcome;
+}
+
 program.command('fix-channels').description('Detect/repair single-channel mic recordings (fill both channels from the live one)')
   .option('--channel <side>', 'force left or right as the live channel')
   .option('--disable', 'disable an existing channel fix (record is kept)')
   .option('--detect-only', 'analyze and print channel balance without writing the manifest')
   .action((opts) => {
-    const workspace = workspaceOption(program.opts().workspace);
-    if (opts.channel && !['left', 'right'].includes(opts.channel)) throw new Error('--channel must be left or right');
-    if (opts.detectOnly) {
-      const balance = analyzeChannelBalance(resolve(workspace, 'input/source.mp4'));
-      print(program.opts().json ? balance : `channels: ${balance.channels}\nleft RMS: ${balance.leftRmsDb?.toFixed(1) ?? 'n/a'} dB\nright RMS: ${balance.rightRmsDb?.toFixed(1) ?? 'n/a'} dB\nrecommendation: ${balance.recommendation ?? 'none (balanced or non-stereo)'}`, program.opts().json);
-      return;
-    }
-    const outcome = applyChannelFix(workspace, { channel: opts.channel as 'left' | 'right' | undefined, disable: Boolean(opts.disable) });
-    const summary = outcome.action === 'applied'
-      ? `Channel fix applied: ${outcome.fix.sourceChannel} (auto: ${outcome.fix.detection.auto}). Re-run "ets extract-audio --yes" and "ets transcribe" to refresh derived audio.`
-      : outcome.action === 'disabled' ? 'Channel fix disabled (record kept). Re-run "ets extract-audio --yes" to restore averaged extraction.'
-      : outcome.action === 'unchanged' ? `No change: ${outcome.reason}`
-      : `No fix needed: ${outcome.reason}`;
-    // Already-detached clips don't refresh through extract-audio/transcribe — the
-    // detached WAV is a separate derivative (assets/audio/<assetId>.wav) that only
-    // detach-audio (with refresh:true) revisits (issue #4).
-    const detachedClipIds = (outcome.action === 'applied' || outcome.action === 'disabled')
-      ? outcome.manifest.tracks.flatMap((track) => track.clips).filter((clip) => clip.audioDetached).map((clip) => clip.clipId)
-      : [];
-    const refreshNote = detachedClipIds.length
-      ? ` Clips with detached audio need a refresh: POST .../clips/<clipId>/detach-audio with {"refresh":true} for: ${detachedClipIds.join(', ')}.`
-      : '';
-    print(program.opts().json
-      ? { ...withoutManifest(outcome), ...(detachedClipIds.length ? { detachedClipsNeedingRefresh: detachedClipIds } : {}) }
-      : summary + refreshNote, program.opts().json);
+    handleFixChannelsCommand(opts, program.opts());
   });
 
 program.command('transcribe').description('Transcribe audio into transcript/words.json and transcript.md')
