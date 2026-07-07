@@ -68,6 +68,7 @@ function makeManifest(): ManifestV3 {
     ],
     operations: [],
     outputs: [{ outputId: 'output_full_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],
+    takeGroups: [],
     renderPresets: { draft: { resolution: '1280x720', videoBitrate: '2500k', audioBitrate: '128k' }, youtube: { resolution: '1920x1080', videoBitrate: '6000k', audioBitrate: '192k' } }
   };
 }

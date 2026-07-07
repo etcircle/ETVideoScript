@@ -15,6 +15,7 @@ const timelineManifest: ManifestV3 = {
   assets: [],
   operations: [],
   outputs: [],
+  takeGroups: [],
   renderPresets: { draft: { resolution: '720p', videoBitrate: '2500k', audioBitrate: '128k' }, youtube: { resolution: '1080p', videoBitrate: '8000k', audioBitrate: '192k' } },
   tracks: [{ trackId: 'v1', kind: 'video', name: 'V1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [
     { clipId: 'c1', assetId: 'a1', sourceStart: 10, sourceEnd: 20, timelineStart: 0 },
@@ -43,7 +44,7 @@ describe('editor selectors', () => {
   it('finds latest failed render draft job and computes duration from manifest tracks', () => {
     const jobs: Job[] = [{ jobId: 'j1', type: 'render-draft', status: 'failed', error: 'boom', createdAt: '2026-05-25T07:00:00.000Z' }];
     expect(latestFailedRenderJob(jobs)?.error).toBe('boom');
-    expect(projectDuration({ manifestVersion: 3, projectId: 'p1', createdAt: '', updatedAt: '', assets: [], operations: [], outputs: [], renderPresets: { draft: { resolution: '720p', videoBitrate: '2500k', audioBitrate: '128k' }, youtube: { resolution: '1080p', videoBitrate: '8000k', audioBitrate: '192k' } }, tracks: [{ trackId: 'v1', kind: 'video', name: 'V1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'c1', assetId: 'a1', sourceStart: 0, sourceEnd: 10, timelineStart: 5 }] }] })).toBe(15);
+    expect(projectDuration({ manifestVersion: 3, projectId: 'p1', createdAt: '', updatedAt: '', assets: [], operations: [], outputs: [], takeGroups: [], renderPresets: { draft: { resolution: '720p', videoBitrate: '2500k', audioBitrate: '128k' }, youtube: { resolution: '1080p', videoBitrate: '8000k', audioBitrate: '192k' } }, tracks: [{ trackId: 'v1', kind: 'video', name: 'V1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'c1', assetId: 'a1', sourceStart: 0, sourceEnd: 10, timelineStart: 5 }] }] })).toBe(15);
   });
 
   it('ignores a failed render once a more recent succeeded render exists', () => {

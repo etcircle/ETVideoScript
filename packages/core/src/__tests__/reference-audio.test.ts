@@ -33,6 +33,7 @@ function fixtureManifest(durationSec: number): ManifestV3 {
     ],
     operations: [],
     outputs: [{ outputId: 'output_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],
+    takeGroups: [],
     renderPresets: {
       draft: { resolution: '160x90', videoBitrate: '250k', audioBitrate: '64k' },
       youtube: { resolution: '320x180', videoBitrate: '500k', audioBitrate: '128k' }

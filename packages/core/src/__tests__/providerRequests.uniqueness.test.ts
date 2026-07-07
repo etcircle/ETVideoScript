@@ -26,6 +26,7 @@ function manifest(projectId: string): ManifestV3 {
     updatedAt: now,
     operations: [],
     outputs: [],
+    takeGroups: [],
     renderPresets: presets
   };
 }

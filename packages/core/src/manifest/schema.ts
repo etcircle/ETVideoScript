@@ -3,6 +3,7 @@ import { AssetSchema } from '../assets/schema';
 import { OperationSchema } from '../operations/registry';
 import { OutputSchema } from '../outputs/schema';
 import { TrackSchema } from '../tracks/schema';
+import { ComposeStateSchema, TakeGroupSchema } from '../takes/schema';
 
 export const RenderPresetSchema = z.object({
   resolution: z.string(),
@@ -93,7 +94,11 @@ export const ManifestV3Schema = z.object({
   /** Optional project-level studio-sound cleanup. Absent = no cleanup applied. */
   studioCleanup: StudioCleanupSchema.optional(),
   /** Optional project-level single-channel-mic fix. Absent = stereo source untouched. */
-  audioChannelFix: AudioChannelFixSchema.optional()
+  audioChannelFix: AudioChannelFixSchema.optional(),
+  /** Candidate take groups awaiting composition into the timeline. Empty = no multi-take workflow in progress. */
+  takeGroups: z.array(TakeGroupSchema).default([]),
+  /** Fingerprint of the last successful take-group composition, if any. */
+  composeState: ComposeStateSchema.optional()
 });
 
 export type ManifestV3 = z.infer<typeof ManifestV3Schema>;

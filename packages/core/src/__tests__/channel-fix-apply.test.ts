@@ -18,6 +18,7 @@ function manifestFixture() {
     tracks: [{ trackId: 'track_video_001', kind: 'video' as const, name: 'Video 1', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline' as const, clips: [{ clipId: 'clip_001', assetId: 'asset_video_001', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] }],
     operations: [],
     outputs: [{ outputId: 'out_001', kind: 'full' as const, aspects: ['16:9' as const], status: 'manual' as const }],
+    takeGroups: [],
     renderPresets: presets
   };
 }

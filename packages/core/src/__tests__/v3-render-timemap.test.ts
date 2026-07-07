@@ -48,6 +48,7 @@ function manifest(operations: ManifestV3['operations'] = []): ManifestV3 {
     ],
     operations,
     outputs: [{ outputId: 'output_full_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],
+    takeGroups: [],
     renderPresets: presets
   };
 }

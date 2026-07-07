@@ -14,6 +14,7 @@ const manifest: ManifestV3 = {
   ] }],
   operations: [],
   outputs: [],
+  takeGroups: [],
   renderPresets: { draft: { resolution: '1280x720', videoBitrate: '2500k', audioBitrate: '128k' }, youtube: { resolution: 'source', videoBitrate: 'source-or-auto', audioBitrate: '192k' } }
 };
 

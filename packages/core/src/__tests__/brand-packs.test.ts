@@ -15,6 +15,7 @@ function manifestV3(overrides: Partial<ManifestV3> = {}): ManifestV3 {
     operations: [],
     outputs: [{ outputId: 'output_full_001', kind: 'full', aspects: ['16:9'], status: 'manual' }],
     renderPresets: presets,
+    takeGroups: [],
     ...overrides
   };
 }

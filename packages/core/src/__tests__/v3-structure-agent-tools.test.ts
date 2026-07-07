@@ -42,6 +42,7 @@ function manifest(): ManifestV3 {
     tracks: [{ trackId: 'track_video', kind: 'video', name: 'Video', order: 0, locked: false, muted: false, solo: false, hidden: false, role: 'timeline', clips: [{ clipId: 'clip_1', assetId: 'asset_video', sourceStart: 0, sourceEnd: 10, timelineStart: 0 }] }],
     operations: [],
     outputs: [{ outputId: 'output_full', kind: 'full', aspects: ['16:9'], status: 'manual' }],
+    takeGroups: [],
     renderPresets: presets
   };
 }

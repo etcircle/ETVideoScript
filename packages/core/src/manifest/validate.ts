@@ -168,6 +168,22 @@ export function validateManifestV3Document(input: unknown, ctx: ManifestV3Valida
     if (track.kind !== 'video') errors.push(`${track.trackId}: staging track must be a video track`);
   }
 
+  const stagingClipIds = new Set(stagingTracks.flatMap((track) => track.clips.map((clip) => clip.clipId)));
+  const groupIds = new Set<string>();
+  const groupedClipIds = new Set<string>();
+  for (const group of manifest.takeGroups) {
+    if (groupIds.has(group.groupId)) errors.push(`Take group id is duplicated: ${group.groupId}`);
+    groupIds.add(group.groupId);
+    for (const clipId of group.clipIds) {
+      if (!stagingClipIds.has(clipId)) errors.push(`Take group ${group.groupId}: ${clipId} is not on the staging track`);
+      if (groupedClipIds.has(clipId)) errors.push(`${clipId} appears in more than one take group`);
+      groupedClipIds.add(clipId);
+    }
+    if (group.reference?.kind === 'take' && !group.clipIds.includes(group.reference.clipId)) {
+      errors.push(`Take group ${group.groupId}: reference clip ${group.reference.clipId} is not in the group`);
+    }
+  }
+
   errors.push(...validateOperationOverlaps(manifest.operations));
   return { valid: errors.length === 0, errors, warnings };
 }

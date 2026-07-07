@@ -9,7 +9,7 @@ function clip(clipId: string, timelineStart: number) {
 }
 
 function manifest(tracks: ManifestV3['tracks']): ManifestV3 {
-  return { manifestVersion: 3, projectId: 'transcribable-clips', createdAt: now, updatedAt: now, assets: [], tracks, operations: [], outputs: [], renderPresets };
+  return { manifestVersion: 3, projectId: 'transcribable-clips', createdAt: now, updatedAt: now, assets: [], tracks, operations: [], outputs: [], takeGroups: [], renderPresets };
 }
 
 describe('transcribableClips', () => {
