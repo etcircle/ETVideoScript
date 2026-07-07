@@ -2,6 +2,8 @@ export * from './browser';
 
 export * from './schemas';
 export * from './takes/schema';
+export * from './brief/schema';
+export * from './brief/io';
 export * from './filesystem';
 export * from './media';
 export * from './channelBalance';

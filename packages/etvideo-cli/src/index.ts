@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, STUDIO_CLEANUP_STALE_WARNING, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
@@ -498,6 +498,44 @@ program.command('export-captions').description('Export edited captions from mani
     const output = outputRel;
     print(program.opts().json ? { output } : `Captions ready: ${output}`, program.opts().json);
   });
+
+function takesCliAction(json: boolean | undefined, fn: () => void) {
+  try { fn(); } catch (err) {
+    if (err instanceof TakesError) {
+      if (json) print({ error: { code: err.code, message: err.message, details: err.details ?? null } }, true);
+      else console.error(`${err.code}: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+}
+
+const briefCommand = program.command('brief').description('Manage the project brief that educates edit decisions');
+briefCommand.command('init').description('Write a brief.md template to fill in')
+  .action(() => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    const target = join(workspace, 'brief.md');
+    if (existsSync(target)) throw new TakesError('BRIEF_INVALID', 'brief.md already exists; edit it directly or use `ets brief set --file --force`');
+    writeFileSync(target, briefTemplate());
+    print(program.opts().json ? { path: target } : `Brief template written: ${target}`, program.opts().json);
+  }));
+briefCommand.command('set').description('Validate and install a brief file as brief.md')
+  .requiredOption('--file <path>', 'markdown file with YAML frontmatter')
+  .option('--force', 'overwrite an existing brief.md')
+  .action((opts) => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    if (existsSync(join(workspace, 'brief.md')) && !opts.force) throw new TakesError('BRIEF_INVALID', 'brief.md already exists; pass --force to replace it');
+    const raw = readFileSync(resolve(opts.file), 'utf8');
+    writeFileSync(join(workspace, 'brief.md'), raw);
+    const brief = readBrief(workspace); // validates; throws (and leaves file for inspection) if invalid
+    print(program.opts().json ? { frontmatter: brief.frontmatter } : `Brief set: ${brief.frontmatter.title}`, program.opts().json);
+  }));
+briefCommand.command('show').description('Print the parsed brief')
+  .action(() => takesCliAction(program.opts().json, () => {
+    const brief = readBrief(workspaceOption(program.opts().workspace));
+    print(program.opts().json ? brief : `# ${brief.frontmatter.title}\naudience: ${brief.frontmatter.audience}\ntone: ${brief.frontmatter.tone ?? '-'}\ntarget: ${brief.frontmatter.targetDurationSec ?? '-'}s\n\n${brief.body}`, program.opts().json);
+  }));
 
 program.command('skill')
   .description('Run a reference agent skill against an agent WebSocket')
