@@ -1138,7 +1138,7 @@ describe('projectSpans', () => {
   it('flubbed words lower matchQuality but not coverage', () => {
     const { candidates } = project('alpha beta gamma delta epsilon zeta', 'alpha beta WRONG delta epsilon zeta');
     expect(candidates[0].coverage).toBe(1);
-    expect(candidates[0].matchQuality).toBeCloseTo(5 / 6, 5);
+    expect(candidates[0].matchQuality).toBeCloseTo(5 / 6, 4); // matchQuality is rounded to 4 decimals (.toFixed(4)) for deterministic artifact output, so assert to 4
   });
 
   it('drops candidates under MIN_CANDIDATE_COVERAGE', () => {
