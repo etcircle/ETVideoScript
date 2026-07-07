@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { materializeComposition, validateComposition, COMPOSE_PAD } from '../takes/composition';
 import type { AlignmentArtifact, CompositionFile } from '../takes/schema';
-import { makeManifest, makeTrack, makeClip, makeVideoAsset } from './takes-fixtures';
+import { makeManifest, makeTrack, makeClip, makeVideoAsset, makeWords } from './takes-fixtures';
 
 function metrics(over: Partial<AlignmentArtifact['candidates'][number]['metrics']> = {}) {
   return { fillerCount: 0, falseStartCount: 0, wordsPerSec: 3, silenceRatio: 0.1, durationSec: 4, headBoundaryScore: 0.9, tailBoundaryScore: 0.9, ...over };
@@ -88,6 +88,44 @@ describe('validateComposition', () => {
     const reordered = { ...valid, selections: [{ order: 1, clipId: 'clip_take_02', spanIds: ['s002'], rationale: 'x' }, { order: 2, clipId: 'clip_take_01', spanIds: ['s001'], rationale: 'y' }] };
     expect(validateComposition(manifestWithTakes(), alignment, reordered).warnings.some((w) => w.rule === 'W4')).toBe(true);
   });
+  it('W3 warns on a low-coverage or truncated candidate', () => {
+    const lowCoverage: AlignmentArtifact = { ...alignment, candidates: alignment.candidates.map((c) => c.spanId === 's001' && c.clipId === 'clip_take_01' ? { ...c, coverage: 0.5 } : c) };
+    expect(validateComposition(manifestWithTakes(), lowCoverage, valid).warnings.some((w) => w.rule === 'W3')).toBe(true);
+  });
+});
+
+describe('validateComposition — neighbour-word pad clamp', () => {
+  const smallAlignment: AlignmentArtifact = {
+    schemaVersion: 1, groupId: 'main', generatedAt: '2026-01-01T00:00:00.000Z', reference: { kind: 'take', clipId: 'clip_take_01' },
+    takes: [{ clipId: 'clip_take_01', assetId: 'a1', label: 'take 01', wordCount: 5, matchedFraction: 1, lowConfidence: false }],
+    spans: [{ spanId: 's001', ordinal: 1, text: 'span one' }],
+    candidates: [candidate('s001', 'clip_take_01', { takeWordStart: 2, takeWordEnd: 3, tStart: 1, tEnd: 2 })],
+    orphans: []
+  };
+  const comp: CompositionFile = { schemaVersion: 1, groupId: 'main', selections: [{ order: 1, clipId: 'clip_take_01', spanIds: ['s001'], rationale: 'x' }], gaps: [] };
+
+  function manifestOneTake() {
+    const staging = makeTrack({ trackId: 'track_takes', kind: 'video', role: 'staging', clips: [makeClip('clip_take_01', 'a1', 30)] });
+    const timeline = makeTrack({ trackId: 'track_video', kind: 'video', order: 0, clips: [] });
+    return makeManifest({ assets: [makeVideoAsset('a1', 30)], tracks: [timeline, staging], takeGroups: [{ groupId: 'main', label: 'main', clipIds: ['clip_take_01'] }] });
+  }
+
+  it('clamps sourceStart to the preceding word when it falls within the pad window', () => {
+    const words = makeWords('a b c d e', { clipId: 'clip_take_01', wordSec: 0.3, gapSec: 0.05 });
+    const takeTranscripts = new Map([['clip_take_01', words]]);
+    const result = validateComposition(manifestOneTake(), smallAlignment, comp, takeTranscripts);
+    expect(result.errors).toEqual([]);
+    // words[1].end (0.65) is only 0.05s before words[2].start (0.70) — closer than the 0.12s pad, so the pad must clamp to it.
+    expect(result.plan[0].sourceStart).toBeCloseTo(words[1].end, 5);
+  });
+
+  it('applies the full pad when the preceding word is far away', () => {
+    const words = makeWords('a b c d e', { clipId: 'clip_take_01', wordSec: 0.3, gapsAfter: { 1: 1 } });
+    const takeTranscripts = new Map([['clip_take_01', words]]);
+    const result = validateComposition(manifestOneTake(), smallAlignment, comp, takeTranscripts);
+    expect(result.errors).toEqual([]);
+    expect(result.plan[0].sourceStart).toBeCloseTo(words[2].start - COMPOSE_PAD.headSec, 5);
+  });
 });
 
 describe('materializeComposition', () => {
@@ -108,5 +146,35 @@ describe('materializeComposition', () => {
     const before = JSON.stringify(m);
     materializeComposition(m, validateComposition(m, alignment, valid).plan);
     expect(JSON.stringify(m)).toBe(before);
+  });
+
+  it('disables an op targeting a prior composed clip when reapplying, even when the id is reused for different footage', () => {
+    const m = manifestWithTakes();
+    const firstPlan = validateComposition(m, alignment, valid).plan;
+    const composed = materializeComposition(m, firstPlan);
+    const withOp = {
+      ...composed,
+      operations: [{
+        id: 'op1',
+        type: 'mute' as const,
+        status: 'approved' as const,
+        target: { kind: 'clip-span' as const, trackId: 'track_video', clipId: 'clip_comp_001', start: 0, end: 1 },
+        proposedBy: 'agent' as const,
+        createdBy: 'agent' as const,
+        createdAt: '2026-01-01T00:00:00.000Z'
+      }]
+    };
+    // Reapply with the same selection count so clip_comp_001/002 ids are reused, but for
+    // swapped footage (clip_take_02 now occupies the clip_comp_001 slot).
+    const swapped: CompositionFile = {
+      ...valid,
+      selections: [
+        { order: 1, clipId: 'clip_take_02', spanIds: ['s001'], rationale: 'x' },
+        { order: 2, clipId: 'clip_take_01', spanIds: ['s002'], rationale: 'y' }
+      ]
+    };
+    const secondPlan = validateComposition(withOp, alignment, swapped).plan;
+    const reapplied = materializeComposition(withOp, secondPlan);
+    expect(reapplied.operations[0].status).toBe('disabled');
   });
 });

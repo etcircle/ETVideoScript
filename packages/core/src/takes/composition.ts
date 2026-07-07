@@ -1,4 +1,5 @@
 import type { ManifestV3 } from '../manifest/schema';
+import type { TranscriptWord } from '../schemas';
 import type { AlignmentArtifact, CompositionFile, SpanCandidate } from './schema';
 
 export const COMPOSE_PAD = { headSec: 0.12, tailSec: 0.12 } as const;
@@ -12,7 +13,7 @@ export interface MaterializedClipPlan {
 export interface CompositionIssue { rule: string; message: string; spanId?: string; clipId?: string }
 export interface CompositionValidation { errors: CompositionIssue[]; warnings: CompositionIssue[]; plan: MaterializedClipPlan[] }
 
-export function validateComposition(manifest: ManifestV3, alignment: AlignmentArtifact, composition: CompositionFile): CompositionValidation {
+export function validateComposition(manifest: ManifestV3, alignment: AlignmentArtifact, composition: CompositionFile, takeTranscripts?: Map<string, TranscriptWord[]>): CompositionValidation {
   const errors: CompositionIssue[] = [];
   const warnings: CompositionIssue[] = [];
 
@@ -90,12 +91,26 @@ export function validateComposition(manifest: ManifestV3, alignment: AlignmentAr
     const endWord = selWordEnd - tail;
     if (startWord > endWord) { errors.push({ rule: 'V6', message: `trim removes all words for ${sel.clipId}`, clipId: sel.clipId }); continue; }
 
-    // Times: use candidate tStart/tEnd for span selections (already word-accurate); for trims/orphans recompute from candidate word times is not available here, so use candidate tStart/tEnd adjusted only when no trim. When trim>0 we approximate by candidate boundaries; exact per-word retrim is a follow-up. Guard V7 with asset duration.
-    const baseStart = sel.orphanId ? orphanOf.get(sel.orphanId)!.tStart : firstCandidate!.tStart;
-    const baseEnd = sel.orphanId ? orphanOf.get(sel.orphanId)!.tEnd : lastCandidate!.tEnd;
+    // Source times (spec §10 step 1): when the take transcript is available, use per-word
+    // timings so (a) trim shifts the times, and (b) the COMPOSE_PAD is clamped to the
+    // neighbouring UNSELECTED word so it cannot bleed adjacent audio. `startWord`/`endWord`
+    // are original take-word indices AFTER trim. Fall back to candidate span boundaries +
+    // [0, assetDuration] only when no transcript is passed (pure rule-logic tests).
     const assetDur = durationOfAsset.get(assetId) ?? Infinity;
-    const sourceStart = Math.max(0, baseStart - COMPOSE_PAD.headSec);
-    const sourceEnd = Math.min(assetDur, baseEnd + COMPOSE_PAD.tailSec);
+    const takeWords = takeTranscripts?.get(sel.clipId);
+    let sourceStart: number;
+    let sourceEnd: number;
+    if (takeWords && takeWords[startWord] && takeWords[endWord]) {
+      const prevWordEnd = startWord > 0 ? takeWords[startWord - 1].end : 0;
+      const nextWordStart = endWord < takeWords.length - 1 ? takeWords[endWord + 1].start : assetDur;
+      sourceStart = Math.max(0, prevWordEnd, takeWords[startWord].start - COMPOSE_PAD.headSec);
+      sourceEnd = Math.min(assetDur, nextWordStart, takeWords[endWord].end + COMPOSE_PAD.tailSec);
+    } else {
+      const baseStart = sel.orphanId ? orphanOf.get(sel.orphanId)!.tStart : firstCandidate!.tStart;
+      const baseEnd = sel.orphanId ? orphanOf.get(sel.orphanId)!.tEnd : lastCandidate!.tEnd;
+      sourceStart = Math.max(0, baseStart - COMPOSE_PAD.headSec);
+      sourceEnd = Math.min(assetDur, baseEnd + COMPOSE_PAD.tailSec);
+    }
     if (!(sourceStart < sourceEnd)) { errors.push({ rule: 'V7', message: `empty source range for ${sel.clipId}`, clipId: sel.clipId }); continue; }
 
     const durationSec = sourceEnd - sourceStart;
@@ -127,13 +142,16 @@ export function materializeComposition(manifest: ManifestV3, plan: MaterializedC
   const clone: ManifestV3 = JSON.parse(JSON.stringify(manifest));
   const timeline = clone.tracks.find((t) => t.kind === 'video' && t.role !== 'staging') ?? clone.tracks.find((t) => t.role !== 'staging');
   if (!timeline) throw new Error('No timeline video track to materialize into');
-  const newClipIds = new Set(plan.map((p) => p.clipId));
+  // Every prior timeline clip is being replaced. Any op targeting one is now stale (its
+  // clip holds different footage after a re-compose), so disable it - never delete (spec
+  // §10.3). Do NOT also require the id to be absent from the new plan: clip_comp numbering
+  // restarts at 001, so a same-count reapply reuses the same id strings for different
+  // content; excluding new ids would leave a mute/cut wrongly active on re-purposed footage.
   const replacedClipIds = new Set(timeline.clips.map((c) => c.clipId));
   timeline.clips = plan.map((p) => ({ clipId: p.clipId, assetId: p.assetId, sourceStart: p.sourceStart, sourceEnd: p.sourceEnd, timelineStart: p.timelineStart }));
-  // Disable operations that targeted the previously-composed clips (never delete).
   for (const op of clone.operations) {
     const target = op.target as { clipId?: string };
-    if (target.clipId && replacedClipIds.has(target.clipId) && !newClipIds.has(target.clipId) && op.status !== 'disabled') op.status = 'disabled';
+    if (target.clipId && replacedClipIds.has(target.clipId) && op.status !== 'disabled') op.status = 'disabled';
   }
   return clone;
 }

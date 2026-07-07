@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, importTake, computeAlignment, readAlignment, writeAlignment, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, nowIso, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, TranscriptWordsSchema, validateComposition, materializeComposition, deriveChapters, readComposition, compositionHash, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, importTake, computeAlignment, readAlignment, writeAlignment, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, nowIso, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, TranscriptWordsSchema, validateComposition, materializeComposition, deriveChapters, readComposition, compositionHash, type ProviderKind, type ProviderRecord, type TranscriptWord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
@@ -656,7 +656,15 @@ program.command('compose').description('Materialize a take composition into the 
     const manifest = loadManifestV3(workspace);
     const alignment = readAlignment(workspace);
     const composition = readComposition(workspace, opts.file);
-    const validation = validateComposition(manifest, alignment, composition);
+    // Load per-clip take transcripts so validateComposition can pad-clamp to neighbour words
+    // and apply trim per-word (spec §10). Reuse loadClipTranscript from the takes verbs.
+    const group = manifest.takeGroups.find((g) => g.groupId === composition.groupId);
+    const takeTranscripts = new Map<string, TranscriptWord[]>();
+    for (const clipId of group?.clipIds ?? []) {
+      const words = loadClipTranscript(workspace, clipId);
+      if (words) takeTranscripts.set(clipId, words);
+    }
+    const validation = validateComposition(manifest, alignment, composition, takeTranscripts);
     if (validation.errors.length) throw new TakesError('COMPOSE_VALIDATION', validation.errors.map((e) => `[${e.rule}] ${e.message}${e.spanId ? ` (${e.spanId})` : ''}${e.clipId ? ` (${e.clipId})` : ''}`).join('\n'), validation.errors);
     if (opts.dryRun) {
       const total = validation.plan.reduce((s, p) => s + p.durationSec, 0);
