@@ -9,6 +9,7 @@ export * from './takes/spans';
 export * from './takes/metrics';
 export * from './takes/alignment';
 export * from './takes/io';
+export * from './takes/import';
 export * from './brief/schema';
 export * from './brief/io';
 export * from './filesystem';

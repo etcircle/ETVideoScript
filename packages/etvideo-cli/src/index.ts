@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, importTake, computeAlignment, readAlignment, writeAlignment, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, nowIso, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, TranscriptWordsSchema, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
@@ -536,6 +536,115 @@ briefCommand.command('show').description('Print the parsed brief')
   .action(() => takesCliAction(program.opts().json, () => {
     const brief = readBrief(workspaceOption(program.opts().workspace));
     print(program.opts().json ? brief : `# ${brief.frontmatter.title}\naudience: ${brief.frontmatter.audience}\ntone: ${brief.frontmatter.tone ?? '-'}\ntarget: ${brief.frontmatter.targetDurationSec ?? '-'}s\n\n${brief.body}`, program.opts().json);
+  }));
+
+function loadClipTranscript(workspace: string, clipId: string) {
+  const path = assertInside(workspace, `transcript/${clipId}/words.json`);
+  if (!existsSync(path)) return null;
+  return TranscriptWordsSchema.parse(JSON.parse(readFileSync(path, 'utf8'))).words;
+}
+
+const takesCommand = program.command('takes').description('Multi-take import, alignment, and inspection');
+
+takesCommand.command('add').description('Import one or more takes into the staging track')
+  .argument('<files...>', 'take video files')
+  .option('--group <id>', 'take group id', 'main')
+  .option('--label <label>', 'label (single file only)')
+  .action((files: string[], opts) => takesCliAction(program.opts().json, () => {
+    if (opts.label && files.length > 1) throw new TakesError('COMPOSE_VALIDATION', '--label is only valid with a single file');
+    const workspace = workspaceOption(program.opts().workspace);
+    const results = files.map((file) => importTake(workspace, resolve(file), { groupId: opts.group, label: opts.label }));
+    print(program.opts().json ? results : results.map((r) => `${r.clipId} <- ${r.path} (${r.durationSec.toFixed(1)}s)`).join('\n'), program.opts().json);
+  }));
+
+takesCommand.command('list').description('List take groups and their takes')
+  .action(() => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    const manifest = loadManifestV3(workspace);
+    const rows = manifest.takeGroups.flatMap((g) => g.clipIds.map((clipId) => {
+      const words = loadClipTranscript(workspace, clipId);
+      return { groupId: g.groupId, clipId, transcribed: words !== null, wordCount: words?.length ?? 0 };
+    }));
+    print(program.opts().json ? { groups: manifest.takeGroups, takes: rows } : rows.map((r) => `${r.groupId}/${r.clipId} ${r.transcribed ? `${r.wordCount}w` : 'not transcribed'}`).join('\n') || '(no takes)', program.opts().json);
+  }));
+
+takesCommand.command('align').description('Align takes against a reference script into takes/alignment.json')
+  .option('--group <id>', 'take group id', 'main')
+  .option('--reference <clipId>', 'use a specific take as reference')
+  .option('--script <file>', 'use a plain-text script file as reference')
+  .action((opts) => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    let manifest = loadManifestV3(workspace);
+    const group = manifest.takeGroups.find((g) => g.groupId === opts.group);
+    if (!group) throw new TakesError('TAKES_UNKNOWN_GROUP', `Unknown take group: ${opts.group}. Known: ${manifest.takeGroups.map((g) => g.groupId).join(', ') || '(none)'}`);
+    let scriptText: string | undefined;
+    if (opts.script) {
+      scriptText = readFileSync(resolve(opts.script), 'utf8');
+      mkdirSync(assertInside(workspace, 'takes'), { recursive: true });
+      writeFileSync(assertInside(workspace, 'takes/script.txt'), scriptText);
+      group.reference = { kind: 'file', path: 'takes/script.txt' };
+      saveManifestV3(workspace, manifest, { revision: true });
+    } else if (opts.reference) {
+      group.reference = { kind: 'take', clipId: opts.reference };
+      saveManifestV3(workspace, manifest, { revision: true });
+      manifest = loadManifestV3(workspace);
+    }
+    const transcripts = new Map<string, ReturnType<typeof loadClipTranscript>>();
+    const missing: string[] = [];
+    for (const clipId of group.clipIds) {
+      const words = loadClipTranscript(workspace, clipId);
+      if (!words) missing.push(clipId);
+      else transcripts.set(clipId, words);
+    }
+    if (missing.length) throw new TakesError('TAKES_MISSING_TRANSCRIPTS', `Transcribe these first:\n${missing.map((c) => `  ets transcribe --clip ${c}`).join('\n')}`, { missing });
+    const artifact = computeAlignment({ manifest, groupId: opts.group, transcripts: transcripts as Map<string, NonNullable<ReturnType<typeof loadClipTranscript>>>, scriptText, generatedAt: nowIso() });
+    mkdirSync(assertInside(workspace, 'takes'), { recursive: true });
+    writeAlignment(workspace, artifact);
+    print(program.opts().json ? artifact : `Aligned ${artifact.takes.length} takes, ${artifact.spans.length} spans, ${artifact.orphans.length} orphans${artifact.takes.some((t) => t.lowConfidence) ? ' (low-confidence takes present)' : ''}`, program.opts().json);
+  }));
+
+takesCommand.command('spans').description('Show the span x take decision table')
+  .option('--group <id>', 'take group id', 'main')
+  .option('--contested', 'only spans where the top two candidates are close')
+  .option('--gaps', 'only spans with zero candidates')
+  .action((opts) => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    const artifact = readAlignment(workspace);
+    const byspan = new Map<string, typeof artifact.candidates>();
+    for (const c of artifact.candidates) { const list = byspan.get(c.spanId) ?? []; list.push(c); byspan.set(c.spanId, list); }
+    const composite = (c: (typeof artifact.candidates)[number]) => c.matchQuality - 0.05 * c.metrics.fillerCount - 0.05 * c.metrics.falseStartCount;
+    let spans = artifact.spans;
+    if (opts.gaps) spans = spans.filter((s) => !byspan.has(s.spanId));
+    if (opts.contested) spans = spans.filter((s) => {
+      const list = (byspan.get(s.spanId) ?? []).slice().sort((a, b) => composite(b) - composite(a));
+      return list.length >= 2 && (composite(list[0]) - composite(list[1])) < 0.15;
+    });
+    const rows = spans.map((s) => ({ spanId: s.spanId, ordinal: s.ordinal, text: s.text.split(/\s+/).slice(0, 8).join(' '), words: s.text.split(/\s+/).length, candidates: (byspan.get(s.spanId) ?? []).map((c) => ({ clipId: c.clipId, coverage: c.coverage, matchQuality: c.matchQuality, fillerCount: c.metrics.fillerCount, durationSec: c.metrics.durationSec })) }));
+    print(program.opts().json ? { spans: rows } : rows.map((r) => `${r.spanId} (${r.ordinal}) "${r.text}..." ${r.candidates.map((c) => `${c.clipId}:cov${c.coverage}/mq${c.matchQuality}/f${c.fillerCount}`).join('  ')}`).join('\n') || '(no spans match filter)', program.opts().json);
+  }));
+
+takesCommand.command('span').description('Full detail for one span or orphan')
+  .argument('<spanId>', 'span id (s001) or orphan id (o001)')
+  .option('--take <clipId>', 'limit to one take')
+  .option('--words', 'include word-by-word timings')
+  .action((spanId: string, opts) => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    const artifact = readAlignment(workspace);
+    if (spanId.startsWith('o')) {
+      const orphan = artifact.orphans.find((o) => o.orphanId === spanId);
+      if (!orphan) throw new TakesError('ALIGNMENT_STALE', `No orphan ${spanId} in alignment`);
+      print(program.opts().json ? orphan : `${orphan.orphanId} [${orphan.clipId}] ${orphan.tStart.toFixed(2)}-${orphan.tEnd.toFixed(2)}s: ${orphan.text}`, program.opts().json);
+      return;
+    }
+    const span = artifact.spans.find((s) => s.spanId === spanId);
+    if (!span) throw new TakesError('ALIGNMENT_STALE', `No span ${spanId} in alignment`);
+    let candidates = artifact.candidates.filter((c) => c.spanId === spanId);
+    if (opts.take) candidates = candidates.filter((c) => c.clipId === opts.take);
+    const detail = {
+      span,
+      candidates: candidates.map((c) => ({ ...c, words: opts.words ? (loadClipTranscript(workspace, c.clipId) ?? []).slice(c.takeWordStart, c.takeWordEnd + 1).map((w) => ({ text: w.text, start: w.start, end: w.end })) : undefined }))
+    };
+    print(program.opts().json ? detail : `${span.spanId}: ${span.text}\n${candidates.map((c) => `  ${c.clipId} cov${c.coverage} mq${c.matchQuality} fill${c.metrics.fillerCount} head${c.metrics.headBoundaryScore} tail${c.metrics.tailBoundaryScore}`).join('\n')}`, program.opts().json);
   }));
 
 program.command('skill')
