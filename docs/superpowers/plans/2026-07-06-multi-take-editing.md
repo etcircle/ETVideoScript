@@ -1457,7 +1457,7 @@ describe('metrics', () => {
 import type { TranscriptWord } from '../schemas';
 import { normalizeToken } from './normalize';
 
-export const FILLER_LEXICON = ['um', 'uh', 'erm', 'uhm', 'hmm', 'mmm', 'mhm', 'ah', 'eh', 'like', "y'know", 'yknow'] as const;
+export const FILLER_LEXICON: readonly string[] = ['um', 'uh', 'erm', 'uhm', 'hmm', 'mmm', 'mhm', 'ah', 'eh', 'like', "y'know", 'yknow']; // readonly string[] (not `as const`): a narrow tuple's .includes(string) fails typecheck
 const FILLER_SET = new Set<string>(FILLER_LEXICON);
 
 export interface CandidateMetrics {
@@ -1479,7 +1479,7 @@ export function computeBoundaryScore(takeWords: TranscriptWord[], wordIndex: num
   let terminal: boolean;
   if (edge === 'head') {
     gap = wordIndex === 0 ? Infinity : takeWords[wordIndex].start - takeWords[wordIndex - 1].end;
-    terminal = wordIndex === 0 || SENTENCE_END.test(takeWords[wordIndex - 1].text);
+    terminal = wordIndex > 0 && SENTENCE_END.test(takeWords[wordIndex - 1].text); // i===0 is NOT terminal (no preceding word); it earns full pause credit via the Infinity gap. Keeps head/tail symmetric.
   } else {
     gap = wordIndex === takeWords.length - 1 ? Infinity : takeWords[wordIndex + 1].start - takeWords[wordIndex].end;
     terminal = SENTENCE_END.test(takeWords[wordIndex].text);

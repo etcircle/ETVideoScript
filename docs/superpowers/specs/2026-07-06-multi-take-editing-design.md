@@ -293,7 +293,7 @@ Low-confidence take: if a take's overall matched-word fraction (`match` pairs / 
 ### 7.5 Metrics (`metrics.ts`)
 
 ```ts
-export const FILLER_LEXICON = ['um', 'uh', 'erm', 'uhm', 'hmm', 'mmm', 'mhm', 'ah', 'eh', 'like', "y'know", 'yknow'] as const;
+export const FILLER_LEXICON: readonly string[] = ['um', 'uh', 'erm', 'uhm', 'hmm', 'mmm', 'mhm', 'ah', 'eh', 'like', "y'know", 'yknow'];
 export function computeCandidateMetrics(candidate, takeWords: TranscriptWord[]): CandidateMetrics;
 export function computeBoundaryScore(takeWords: TranscriptWord[], wordIndex: number, edge: 'head' | 'tail'): number;
 ```
@@ -312,7 +312,7 @@ Per candidate (all computed over the candidate's original take words `takeWordSt
 `computeBoundaryScore(words, i, edge)`:
 
 - `gap` = for `head`: `words[i].start - words[i-1].end` (Infinity if i === 0); for `tail`: `words[i+1].start - words[i].end` (Infinity if last word).
-- `terminal` = for `head`: `words[i-1]` ends with sentence-terminal punctuation (or i === 0); for `tail`: `words[i]` ends with sentence-terminal punctuation.
+- `terminal` = for `head`: `words[i-1]` ends with sentence-terminal punctuation (false when i === 0 - no preceding word; the take's first word already earns full pause credit through the Infinity gap, and this keeps head/tail symmetric with a uniform "landed on real sentence punctuation" meaning for the +0.4); for `tail`: `words[i]` ends with sentence-terminal punctuation.
 - `score = min(1, min(gap, 2) / 0.6) * 0.6 + (terminal ? 0.4 : 0)`, rounded to 3 decimals. Range [0,1]. `BOUNDARY_WARN_THRESHOLD = 0.5`.
 
 ### 7.6 Orchestrator (`alignment.ts`)
