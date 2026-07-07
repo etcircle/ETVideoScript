@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, importTake, computeAlignment, readAlignment, writeAlignment, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, nowIso, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, TranscriptWordsSchema, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, importTake, computeAlignment, readAlignment, writeAlignment, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, nowIso, STUDIO_CLEANUP_STALE_WARNING, readBrief, briefTemplate, TakesError, TranscriptWordsSchema, validateComposition, materializeComposition, deriveChapters, readComposition, compositionHash, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
@@ -645,6 +645,48 @@ takesCommand.command('span').description('Full detail for one span or orphan')
       candidates: candidates.map((c) => ({ ...c, words: opts.words ? (loadClipTranscript(workspace, c.clipId) ?? []).slice(c.takeWordStart, c.takeWordEnd + 1).map((w) => ({ text: w.text, start: w.start, end: w.end })) : undefined }))
     };
     print(program.opts().json ? detail : `${span.spanId}: ${span.text}\n${candidates.map((c) => `  ${c.clipId} cov${c.coverage} mq${c.matchQuality} fill${c.metrics.fillerCount} head${c.metrics.headBoundaryScore} tail${c.metrics.tailBoundaryScore}`).join('\n')}`, program.opts().json);
+  }));
+
+program.command('compose').description('Materialize a take composition into the timeline')
+  .command('apply').description('Validate and apply takes/composition.json')
+  .option('--file <path>', 'composition file', 'takes/composition.json')
+  .option('--dry-run', 'validate and print the plan without writing')
+  .action((opts) => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    const manifest = loadManifestV3(workspace);
+    const alignment = readAlignment(workspace);
+    const composition = readComposition(workspace, opts.file);
+    const validation = validateComposition(manifest, alignment, composition);
+    if (validation.errors.length) throw new TakesError('COMPOSE_VALIDATION', validation.errors.map((e) => `[${e.rule}] ${e.message}${e.spanId ? ` (${e.spanId})` : ''}${e.clipId ? ` (${e.clipId})` : ''}`).join('\n'), validation.errors);
+    if (opts.dryRun) {
+      const total = validation.plan.reduce((s, p) => s + p.durationSec, 0);
+      print(program.opts().json ? { plan: validation.plan, warnings: validation.warnings, totalSec: total, rationales: composition.selections.map((s) => ({ order: s.order, rationale: s.rationale })) } : `PLAN (${validation.plan.length} clips, ${total.toFixed(1)}s)\n${validation.plan.map((p) => `  ${p.clipId} ${p.assetId} ${p.sourceStart.toFixed(2)}-${p.sourceEnd.toFixed(2)}s`).join('\n')}\n${validation.warnings.map((w) => `  WARN [${w.rule}] ${w.message}`).join('\n')}`, program.opts().json);
+      return;
+    }
+    let next = materializeComposition(manifest, validation.plan);
+    next = { ...next, composeState: { appliedAt: nowIso(), compositionHash: compositionHash(composition) } };
+    saveManifestV3(workspace, next, { revision: true });
+    print(program.opts().json ? { applied: validation.plan.length, warnings: validation.warnings } : `Applied ${validation.plan.length} clips${validation.warnings.length ? ` (${validation.warnings.length} warnings)` : ''}`, program.opts().json);
+  }));
+
+program.command('export-chapters').description('Export chapter markers from the applied composition')
+  .option('--format <format>', 'json or youtube', 'json')
+  .action((opts) => takesCliAction(program.opts().json, () => {
+    const workspace = workspaceOption(program.opts().workspace);
+    const manifest = loadManifestV3(workspace);
+    const composition = readComposition(workspace);
+    if (!manifest.composeState || manifest.composeState.compositionHash !== compositionHash(composition)) {
+      throw new TakesError('CHAPTERS_STALE', 'Composition has not been applied (or changed since). Run `ets compose apply` first.');
+    }
+    const alignment = readAlignment(workspace);
+    const plan = validateComposition(manifest, alignment, composition).plan;
+    const chapters = deriveChapters(composition, alignment, plan);
+    if (opts.format === 'youtube') {
+      const lines = chapters.map((c) => { const m = Math.floor(c.startSec / 60); const s = Math.floor(c.startSec % 60); return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')} ${c.title}`; });
+      print(program.opts().json ? { chapters, youtube: lines } : lines.join('\n') || '(no chapters set)', program.opts().json);
+    } else {
+      print(program.opts().json ? { chapters } : chapters.map((c) => `${c.startSec.toFixed(1)}s ${c.title}`).join('\n') || '(no chapters set)', program.opts().json);
+    }
   }));
 
 program.command('skill')
