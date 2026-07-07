@@ -526,15 +526,19 @@ Follow every existing CLI convention in that file: Commander subcommands, `--jso
 
 Mirror the new capabilities for WebSocket agent sessions, same thin-wrapper style as the existing add-asset/add-clip tools: `takes_list`, `takes_align`, `takes_spans`, `takes_span_detail`, `compose_validate` (dry-run), `compose_apply`, `brief_show`. Input/output schemas are exactly the core function inputs/outputs from §7-§10; no logic in the tool layer.
 
-## 12. Interaction with `spec/audio-channel-fix` (unmerged branch)
+## 12. Interaction with `spec/audio-channel-fix` (RESOLVED - merged first)
 
-This spec is based on `main`, which has no `audioChannelFix` manifest field. The audio-channel-fix branch adds project-level channel-fix and studio-cleanup scope guards that bail on any project with more than one video source (its `render/plan.ts` guards `videoSourceIds.size === 1`, with comments flagging multi-asset as a known gap).
+This spec's branch is now rebased onto `spec/audio-channel-fix` (tip `68dd10a8`), which merged first. That branch shipped a cleaner design than this section originally assumed, so the interaction is a non-issue and requires no channel-fix code changes in this slice. What it actually shipped:
 
-Rules for whichever branch merges second:
+- `audioChannelFix` stays a single **project-level** record (`AudioChannelFixSchema` in `manifest/schema.ts`), describing ONLY `input/source.mp4`.
+- `channelFixScope.ts` `resolveChannelFixForAsset(manifest, assetPath)` returns the fix only when `assetPath === 'input/source.mp4'`, and its doc comment explicitly tolerates any number of other video assets ("never an unrelated import ... regardless of how many other video assets exist").
+- `render/plan.ts` does NOT bail on multiple video sources. It computes `videoSourceIds`; when `size > 1` (or the base asset path is not `input/source.mp4`) it simply leaves `studioCleanupAudioPath`/`audioSourceChannel` undefined, so both fixes go inert and the render proceeds normally via ordinary multi-input concat.
 
-1. `audioChannelFix` becomes per-asset: either an array keyed by `assetId` or a map - the merge PR converts the single project-level record to `[{ assetId: <primary>, ...record }]` in `migrate-manifest`. `ets fix-channels` gains `--asset <assetId>` (default: the sole video asset in single-source projects; required in multi-take projects).
-2. `studioCleanup` remains project-level and its guard remains: multi-take projects get NO studio cleanup this slice (§4). The guard message must name the limitation explicitly: `studio cleanup is not yet supported for multi-take projects`.
-3. Render-plan guards change from "bail when multiple video sources" to "apply per-asset where a record exists".
+Consequences for multi-take (all favorable):
+
+1. Multi-take takes live at `input/takes/take-NN.mp4`, never `input/source.mp4`, so `resolveChannelFixForAsset` returns undefined for them - takes are treated as normal stereo, correctly. No per-asset migration, no `--asset` flag, no `migrate-manifest` change. The original §12 plan for a per-asset conversion is DROPPED as unnecessary.
+2. After `compose apply` the timeline draws from multiple take assets, so `videoSourceIds.size > 1` makes channel-fix and studio-cleanup inert automatically - which is exactly the "no studio cleanup for multi-take this slice" behavior §4 requires. No new guard message needed; the existing graceful-skip covers it.
+3. One required integration change, folded into Task 1: `videoSourceIds` (plan.ts:213-217) counts clips from every video track INCLUDING the staging track, but staging clips are never rendered (6.1 rule 3 excludes them from `buildBaseTimeline`). Excluding staging tracks from the timeline but letting them count as "video sources" that suppress a legitimate single-source fix is inconsistent. Task 1 must filter `t.role !== 'staging'` into the `videoSourceIds` computation, with a test that a single-source project keeps its channel fix active after takes are staged.
 
 ## 13. Agent workflow: `skills/compose-from-takes/`
 

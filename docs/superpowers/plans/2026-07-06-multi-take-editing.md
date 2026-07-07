@@ -32,6 +32,7 @@
 - Modify: `packages/core/src/timeMap/compose.ts:11-25` (`buildBaseTimeline`)
 - Modify: `packages/core/src/transcript.ts:225-244` (`primaryVideoClips`, `transcribableClips`)
 - Modify: `packages/core/src/manifest/validate.ts` (`validateManifestV3Document`, after the asset-id loop)
+- Modify: `packages/core/src/render/plan.ts:213-217` (`videoSourceIds` computation - exclude staging tracks; see spec §12 point 3, added after the rebase onto spec/audio-channel-fix)
 - Create: `packages/core/src/__tests__/takes-fixtures.ts`
 - Test: `packages/core/src/__tests__/staging-track.test.ts`
 
@@ -191,6 +192,36 @@ NOTE the deliberate change vs the old code: staging clips keep import order and 
     if (track.kind !== 'video') errors.push(`${track.trackId}: staging track must be a video track`);
   }
 ```
+
+`render/plan.ts:213-217` - exclude staging tracks from `videoSourceIds` (spec §12 point 3). Staging clips are never rendered, so they must not count as "video sources" that would suppress a legitimate single-source `audioChannelFix`/`studioCleanup`. Add the `role` filter:
+
+```ts
+  const videoSourceIds = new Set(
+    manifest.tracks
+      .filter((t) => t.kind === 'video' && t.role !== 'staging')
+      .flatMap((t) => (t.clips ?? []).map((c) => c.assetId))
+  );
+```
+
+Add this test to `staging-track.test.ts` (imports `buildRenderPlan` from `../render/plan` - confirm the exact exported name; it may be `buildRenderPlan` or re-exported as `buildRenderPlanV3` from the package root):
+
+```ts
+import { buildRenderPlan } from '../render/plan';
+
+it('staging takes do not suppress a single-source channel fix in the render plan', () => {
+  const sourceAsset = { assetId: 'asset_video_001', kind: 'video' as const, path: 'input/source.mp4', durationSec: 10, provenance: 'imported' as const, video: { width: 1920, height: 1080, fps: 30 }, audio: { sampleRate: 48000, channels: 2 } };
+  const sourceTrack = makeTrack({ trackId: 'track_video', kind: 'video', clips: [makeClip('clip_001', 'asset_video_001', 10)] });
+  const withTakes = makeManifest({
+    assets: [sourceAsset, makeVideoAsset('a2', 20)],
+    tracks: [sourceTrack, staging],
+    audioChannelFix: { status: 'approved', sourceChannel: 'left', detection: { leftRmsDb: -20, rightRmsDb: -60, auto: true }, appliedAt: '2026-01-01T00:00:00.000Z' }
+  });
+  const plan = buildRenderPlan(withTakes);
+  expect(plan.composition.audioSourceChannel).toBe('left'); // still active despite the staged take
+});
+```
+
+If `buildRenderPlan`'s return shape names the field differently, assert on whatever field carries the resolved channel (grep `audioSourceChannel` in `render/plan.ts`). The point of the test: adding a staging take must NOT flip `videoSourceIds.size` above 1 for scope purposes.
 
 - [ ] **Step 4: Run tests + typecheck, verify pass**
 
