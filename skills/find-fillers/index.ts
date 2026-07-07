@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { WebSocket } from 'ws';
 import type { ServerMessage, TranscriptWord } from '@etvideoscript/agent-protocol';
+import { FILLER_LEXICON } from '@etvideoscript/core';
 
 export type TimedClipProposal = { requestId: string; clipId: string; start: number; end: number; reason: string };
 
@@ -9,7 +10,7 @@ function wordClipId(word: TranscriptWord): string { return word.clipId || 'clip_
 
 export function findFillerMuteProposals(words: TranscriptWord[]): TimedClipProposal[] {
   return words
-    .filter((word) => /^(um|uh|like|y'?know)$/i.test(word.normalized || word.text))
+    .filter((word) => FILLER_LEXICON.includes((word.normalized || word.text).toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')))
     .map((word, index) => ({
       requestId: `fillers-${String(index).padStart(4, '0')}`,
       clipId: wordClipId(word),

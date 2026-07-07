@@ -6,6 +6,7 @@ export * from './takes/normalize';
 export * from './takes/anchors';
 export * from './takes/align';
 export * from './takes/spans';
+export * from './takes/metrics';
 export * from './brief/schema';
 export * from './brief/io';
 export * from './filesystem';
