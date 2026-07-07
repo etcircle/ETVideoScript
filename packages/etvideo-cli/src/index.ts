@@ -687,7 +687,16 @@ program.command('export-chapters').description('Export chapter markers from the 
       throw new TakesError('CHAPTERS_STALE', 'Composition has not been applied (or changed since). Run `ets compose apply` first.');
     }
     const alignment = readAlignment(workspace);
-    const plan = validateComposition(manifest, alignment, composition).plan;
+    // Mirror compose apply's transcript loading so the plan (and its pad-clamped source
+    // times) matches what was actually materialized — otherwise chapter timestamps here
+    // would drift from the timeline via the unclamped fallback.
+    const group = manifest.takeGroups.find((g) => g.groupId === composition.groupId);
+    const takeTranscripts = new Map<string, TranscriptWord[]>();
+    for (const clipId of group?.clipIds ?? []) {
+      const words = loadClipTranscript(workspace, clipId);
+      if (words) takeTranscripts.set(clipId, words);
+    }
+    const plan = validateComposition(manifest, alignment, composition, takeTranscripts).plan;
     const chapters = deriveChapters(composition, alignment, plan);
     if (opts.format === 'youtube') {
       const lines = chapters.map((c) => { const m = Math.floor(c.startSec / 60); const s = Math.floor(c.startSec % 60); return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')} ${c.title}`; });
