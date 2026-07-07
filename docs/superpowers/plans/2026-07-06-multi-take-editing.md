@@ -169,9 +169,19 @@ export function transcribableClips(manifest: ManifestV3): Array<{ clipId: string
   const stagingTracks = manifest.tracks.filter((t) => t.role === 'staging');
   const voiceoverTracks = manifest.tracks.filter((t) => t.kind === 'audio' && t.subtype === 'voiceover');
   const seen = new Set<string>();
-  return [videoTrack, ...stagingTracks, ...voiceoverTracks]
+  // Preserve the EXISTING chronological (timelineStart) ordering for the renderable
+  // timeline-video + voiceover clips — mergeTranscripts/transcribeAllClips consume this
+  // order to assemble the merged transcript, and transcribableClips.test.ts pins it.
+  const timelineOrdered = [videoTrack, ...voiceoverTracks]
     .flatMap((track) => (track?.clips ?? []).map((clip) => ({ clipId: clip.clipId, timelineStart: clip.timelineStart, order: track?.order ?? 0 })))
     .filter((clip) => clip.clipId)
+    .sort((a, b) => a.timelineStart - b.timelineStart || a.order - b.order);
+  // Append staging clips AFTER, in track/import order (not re-sorted — all staging clips
+  // have timelineStart 0, so their meaningful order is import order).
+  const stagingOrdered = stagingTracks
+    .flatMap((track) => track.clips.map((clip) => ({ clipId: clip.clipId })))
+    .filter((clip) => clip.clipId);
+  return [...timelineOrdered, ...stagingOrdered]
     .filter((clip) => {
       if (seen.has(clip.clipId)) return false;
       seen.add(clip.clipId);
@@ -181,7 +191,7 @@ export function transcribableClips(manifest: ManifestV3): Array<{ clipId: string
 }
 ```
 
-NOTE the deliberate change vs the old code: staging clips keep import order and come after timeline clips (do NOT re-sort by timelineStart across groups - all staging clips have timelineStart 0). The old `.sort()` is removed; timeline clips are already in track order, staging clips in import order.
+NOTE (corrected during Task 1 review): keep the EXISTING chronological sort for the renderable timeline-video + voiceover clips - `mergeTranscripts`/`transcribeAllClips` consume this order and `transcribableClips.test.ts` pins it, so removing the sort entirely would be a real regression. Staging clips are appended AFTER that ordered set, in track/import order (they all have timelineStart 0, so import order is their meaningful order). This satisfies both the new staging tests and the pre-existing pinned test.
 
 `manifest/validate.ts` - inside `validateManifestV3Document`, right after the track/clip loop (~line 127):
 
