@@ -14,6 +14,7 @@ describe('handleExtractAudioCommand channel-fix wiring', () => {
       extractClipWaveformPeaks: (() => { throw new Error('not used'); }) as any,
       extractAllClipWaveformPeaks: (() => { throw new Error('not used'); }) as any,
       applyChannelFix: (() => { throw new Error('override applyChannelFix per test'); }) as any,
+      analyzeChannelBalance: (() => { throw new Error('not used'); }) as any,
       print: ((value: unknown) => { printed.push(value); }) as any,
       ...overrides
     };
