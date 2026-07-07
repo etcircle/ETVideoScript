@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { addAsset, removeAsset, updateAsset } from '../assets/operations';
 import { AssetSchema } from '../assets/schema';
+import { readBrief } from '../brief/io';
 import { addOperation, updateOperation } from '../manifest/apply';
 import { loadManifestV3, saveManifestV3 } from '../manifest/io';
 import type { ManifestV3 } from '../manifest/schema';
@@ -11,7 +12,11 @@ import { validateManifestV3Document } from '../manifest/validate';
 import { getOperationKind, hasOperationKind } from '../operations/registry';
 import { proposeOutputs } from '../outputs/propose';
 import { buildRenderPlan } from '../render/plan';
-import { TranscriptWordsSchema } from '../schemas';
+import { TranscriptWordsSchema, type TranscriptWord } from '../schemas';
+import { computeAlignment } from '../takes/alignment';
+import { materializeComposition, validateComposition } from '../takes/composition';
+import { compositionHash, readAlignment, writeAlignment } from '../takes/io';
+import { CompositionFileSchema, TakesError } from '../takes/schema';
 import { addClip, addTrack, detachAudioInWorkspace, moveClip, removeClip, removeTrack, renameTrack, reorderTracks, setTrackFlags, trimClip } from '../tracks/operations';
 import { ClipSchema } from '../tracks/schema';
 
@@ -35,6 +40,30 @@ function load(ctx: AgentToolContext): ManifestV3 {
 function save(ctx: AgentToolContext, manifest: ManifestV3): void {
   if (ctx.saveManifest) ctx.saveManifest(manifest, { revision: true });
   else saveManifestV3(ctx.workspacePath, manifest, { revision: true });
+}
+
+/** Per-clip take transcript, or null when the clip has not been transcribed yet. */
+function loadClipTranscript(workspacePath: string, clipId: string): TranscriptWord[] | null {
+  const path = join(workspacePath, `transcript/${clipId}/words.json`);
+  if (!existsSync(path)) return null;
+  return TranscriptWordsSchema.parse(JSON.parse(readFileSync(path, 'utf8'))).words;
+}
+
+/**
+ * Load every transcribed take in a group. Mirrors the CLI's `compose apply` / `export-chapters`
+ * transcript loading exactly (see packages/etvideo-cli/src/index.ts) so validateComposition's
+ * pad-clamp behaves identically whether driven from the CLI or an agent tool call - otherwise
+ * the agent path would fall back to unclamped candidate-boundary times and drift from what
+ * gets materialized.
+ */
+function loadGroupTakeTranscripts(ctx: AgentToolContext, manifest: ManifestV3, groupId: string): Map<string, TranscriptWord[]> {
+  const group = manifest.takeGroups.find((g) => g.groupId === groupId);
+  const transcripts = new Map<string, TranscriptWord[]>();
+  for (const clipId of group?.clipIds ?? []) {
+    const words = loadClipTranscript(ctx.workspacePath, clipId);
+    if (words) transcripts.set(clipId, words);
+  }
+  return transcripts;
 }
 
 const OperationProposalParamsSchema = z.object({
@@ -219,6 +248,65 @@ export const agentToolHandlers = {
     z.object({}).parse(params);
     const transcript = TranscriptWordsSchema.parse(JSON.parse(readFileSync(join(ctx.workspacePath, 'transcript/words.json'), 'utf8')));
     return { result: { outputs: proposeOutputs(load(ctx), transcript) }, changedOperationIds: [] };
+  },
+
+  brief_show(ctx: AgentToolContext) {
+    return { result: readBrief(ctx.workspacePath), changedOperationIds: [] };
+  },
+
+  takes_list(ctx: AgentToolContext) {
+    const manifest = load(ctx);
+    const takes = manifest.takeGroups.flatMap((g) => g.clipIds.map((clipId) => {
+      const words = loadClipTranscript(ctx.workspacePath, clipId);
+      return { groupId: g.groupId, clipId, transcribed: words !== null, wordCount: words?.length ?? 0 };
+    }));
+    return { result: { groups: manifest.takeGroups, takes }, changedOperationIds: [] };
+  },
+
+  takes_align(ctx: AgentToolContext, params: unknown) {
+    const parsed = z.object({ groupId: z.string().default('main'), reference: z.string().optional(), scriptText: z.string().optional() }).parse(params);
+    let manifest = load(ctx);
+    const group = manifest.takeGroups.find((g) => g.groupId === parsed.groupId);
+    if (!group) throw new TakesError('TAKES_UNKNOWN_GROUP', `Unknown take group: ${parsed.groupId}`);
+    if (parsed.reference) {
+      group.reference = { kind: 'take', clipId: parsed.reference };
+      save(ctx, manifest);
+      manifest = load(ctx);
+    }
+    const transcripts = loadGroupTakeTranscripts(ctx, manifest, parsed.groupId);
+    const artifact = computeAlignment({ manifest, groupId: parsed.groupId, transcripts, scriptText: parsed.scriptText, generatedAt: new Date().toISOString() });
+    writeAlignment(ctx.workspacePath, artifact);
+    return { result: artifact, changedOperationIds: [] };
+  },
+
+  takes_spans(ctx: AgentToolContext) {
+    return { result: readAlignment(ctx.workspacePath), changedOperationIds: [] };
+  },
+
+  takes_span_detail(ctx: AgentToolContext, params: unknown) {
+    const parsed = z.object({ spanId: z.string().min(1) }).parse(params);
+    const artifact = readAlignment(ctx.workspacePath);
+    return { result: { span: artifact.spans.find((s) => s.spanId === parsed.spanId), candidates: artifact.candidates.filter((c) => c.spanId === parsed.spanId), orphan: artifact.orphans.find((o) => o.orphanId === parsed.spanId) }, changedOperationIds: [] };
+  },
+
+  compose_validate(ctx: AgentToolContext, params: unknown) {
+    const parsed = z.object({ composition: z.unknown() }).parse(params);
+    const manifest = load(ctx);
+    const composition = CompositionFileSchema.parse(parsed.composition);
+    const takeTranscripts = loadGroupTakeTranscripts(ctx, manifest, composition.groupId);
+    return { result: validateComposition(manifest, readAlignment(ctx.workspacePath), composition, takeTranscripts), changedOperationIds: [] };
+  },
+
+  compose_apply(ctx: AgentToolContext, params: unknown) {
+    const parsed = z.object({ composition: z.unknown() }).parse(params);
+    const manifest = load(ctx);
+    const composition = CompositionFileSchema.parse(parsed.composition);
+    const takeTranscripts = loadGroupTakeTranscripts(ctx, manifest, composition.groupId);
+    const validation = validateComposition(manifest, readAlignment(ctx.workspacePath), composition, takeTranscripts);
+    if (validation.errors.length) throw new TakesError('COMPOSE_VALIDATION', validation.errors.map((e) => `[${e.rule}] ${e.message}`).join('\n'), validation.errors);
+    const next = { ...materializeComposition(manifest, validation.plan), composeState: { appliedAt: new Date().toISOString(), compositionHash: compositionHash(composition) } };
+    save(ctx, next);
+    return { result: { applied: validation.plan.length, warnings: validation.warnings }, changedOperationIds: [] };
   }
 } satisfies Record<string, AgentToolHandler>;
 

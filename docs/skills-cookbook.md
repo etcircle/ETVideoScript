@@ -18,6 +18,20 @@ For ordering, the first roughly 30 words classify clips with greeting/opening ph
 
 Replace the phrase heuristics with your own story logic: chapter titles, speaker names, screen-recording actions, or a user-supplied `--narrative-hint`. Keep the same discipline: read transcript words with `clipId`, emit clip-local ops only, and avoid hidden mutations. Today the protocol has no clip-reorder primitive, so changed order proposals should be logged or performed outside the skill once a deterministic clip-reorder CLI/API exists.
 
+## compose-from-takes
+
+### What it does
+
+`compose-from-takes` is the reference skill for the multi-take pipeline: turning several raw takes of the same script into one composed timeline. Invoke it with `ets skill compose-from-takes --ws-url ws://127.0.0.1:4317/ws/projects/<id>/agent/<session> --token <token> --workspace <ws> --project-id <id> --group main`.
+
+### How it works
+
+It connects to the agent WebSocket, calls `brief_show` (bailing out with a clear message if `brief.md` hasn't been created yet - composition decisions must be grounded in the brief), then `takes_align` to build `takes/alignment.json` from every transcribed take in the group. For each span in the alignment it picks the candidate with the highest composite score (`matchQuality - 0.05*fillerCount - 0.05*falseStartCount`) and builds a composition selecting that take's delivery of the span, in reference order. It applies the result via `compose_apply`, which validates the composition and materializes it into the timeline track (or throws with the specific rule violations if it doesn't validate).
+
+### Adapting for your use case
+
+The composite-score heuristic is a deterministic starting point, not the final word - an agent should read `takes/alignment.json` (or call `takes_spans` / `takes_span_detail`) and override individual span choices based on the brief: preferring a take with better delivery even at a small filler-count cost, picking up an orphan aside as a bonus insert, or leaving a span as a gap for a `voice_patch`. Every selection in the composition file carries a `rationale` field - always fill it in with the actual reason a human or agent would want to know, not a restatement of the rule.
+
 ## Multi-clip skill patterns
 
 ### Derive `clipId` from transcript words

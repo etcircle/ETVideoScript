@@ -64,6 +64,8 @@ pnpm dev:api
 
 CLI quickstart (per-project): `ets init` → `import` → `extract-audio` → `transcribe` → `apply-edit` → `validate-manifest` → `render`. To run the new reference skills: `ets skill find-fillers --ws-url ws://127.0.0.1:4317/ws/projects/<id>/agent/<session> --token <token> --workspace ... --project-id <id>`.
 
+Multi-take: `ets init` -> `ets brief init` (fill it in) -> `ets takes add a.mp4 b.mp4 c.mp4` -> `ets extract-audio` -> `ets transcribe --clip <each>` -> `ets takes align` -> agent reads `ets takes spans`, writes `takes/composition.json` -> `ets compose apply` -> cleanup (find-fillers) -> `ets render` -> `ets export-captions` + `ets export-chapters --format youtube`. Or run the deterministic baseline end-to-end with `ets skill compose-from-takes` (see `docs/skills-cookbook.md`).
+
 ## Browser QA — use the prod build
 
 **For automated/headless browser QA (Hermes, agent-browser, CDP), build production first.** Next.js 16 + Turbopack dev mode has hydration timing quirks under headless CDP — useEffect hooks and event handlers can fail to attach, even though SSR markup is correct. Three QA runs on 2026-05-14 reproduced this. The prod build hydrates cleanly under the same headless harness.

@@ -221,7 +221,7 @@ type UploadStage = { name: string; status: 'queued' | 'waiting_for_approval' | '
 type AgentSocket = { send: (data: string) => void; readyState?: number; protocolVersion?: 2 | 3 };
 type AgentIdempotencyRecord = { tool: ToolName; bodyHash: string; response: ToolResponse };
 const coreAgentToolNames = new Set<AgentToolName>(Object.keys(agentToolHandlersV3) as AgentToolName[]);
-const readOnlyAgentTools = new Set<ToolName>(['get_transcript', 'list_operations', 'get_render_state', 'propose_outputs']);
+const readOnlyAgentTools = new Set<ToolName>(['get_transcript', 'list_operations', 'get_render_state', 'propose_outputs', 'brief_show', 'takes_list', 'takes_spans', 'takes_span_detail', 'compose_validate']);
 const apiWrappedAgentTools = new Set<ToolName>(['render_draft']);
 
 function isCoreAgentTool(tool: ToolName): tool is AgentToolName {

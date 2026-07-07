@@ -180,6 +180,18 @@ const V3ClipIdParamsSchema = MutatingToolBaseSchema.extend({ clipId: z.string().
 const V3DetachAudioParamsSchema = MutatingToolBaseSchema.extend({ clipId: z.string().min(1), detachedClipId: z.string().min(1).optional() }).strict();
 export const StructuralToolParamsSchema = MutatingToolBaseSchema.passthrough();
 
+// Multi-take agent tools (see @etvideoscript/core's agent-tools/index.ts). brief_show/takes_list/
+// takes_spans/takes_span_detail/compose_validate are read-only; takes_align and compose_apply
+// mutate takes/alignment.json or edits/manifest.json and so reuse StructuralToolParamsSchema for
+// the requestId-based idempotency the API layer requires of every mutating tool.
+export const BriefShowParamsSchema = z.object({});
+export const TakesListParamsSchema = z.object({});
+export const TakesAlignParamsSchema = StructuralToolParamsSchema;
+export const TakesSpansParamsSchema = z.object({});
+export const TakesSpanDetailParamsSchema = z.object({ spanId: z.string().min(1) });
+export const ComposeValidateParamsSchema = z.object({ composition: z.unknown() });
+export const ComposeApplyParamsSchema = StructuralToolParamsSchema;
+
 export type GetTranscriptParams = z.infer<typeof GetTranscriptParamsSchema>;
 export type ListOperationsParams = z.infer<typeof ListOperationsParamsSchema>;
 export type ProposeCutParams = z.infer<typeof ProposeCutParamsSchema>;
@@ -218,7 +230,14 @@ export const ToolNameSchema = z.enum([
   'add_asset',
   'remove_asset',
   'update_asset',
-  'propose_outputs'
+  'propose_outputs',
+  'brief_show',
+  'takes_list',
+  'takes_align',
+  'takes_spans',
+  'takes_span_detail',
+  'compose_validate',
+  'compose_apply'
 ]);
 export type ToolName = z.infer<typeof ToolNameSchema>;
 
@@ -246,7 +265,14 @@ export const ToolParamsSchemaByName = {
   add_asset: StructuralToolParamsSchema,
   remove_asset: StructuralToolParamsSchema,
   update_asset: StructuralToolParamsSchema,
-  propose_outputs: StructuralToolParamsSchema
+  propose_outputs: StructuralToolParamsSchema,
+  brief_show: BriefShowParamsSchema,
+  takes_list: TakesListParamsSchema,
+  takes_align: TakesAlignParamsSchema,
+  takes_spans: TakesSpansParamsSchema,
+  takes_span_detail: TakesSpanDetailParamsSchema,
+  compose_validate: ComposeValidateParamsSchema,
+  compose_apply: ComposeApplyParamsSchema
 } as const;
 
 export type ToolParamsByName = {
@@ -274,6 +300,13 @@ export type ToolParamsByName = {
   remove_asset: Record<string, unknown>;
   update_asset: Record<string, unknown>;
   propose_outputs: Record<string, unknown>;
+  brief_show: Record<string, unknown>;
+  takes_list: Record<string, unknown>;
+  takes_align: Record<string, unknown>;
+  takes_spans: Record<string, unknown>;
+  takes_span_detail: z.infer<typeof TakesSpanDetailParamsSchema>;
+  compose_validate: z.infer<typeof ComposeValidateParamsSchema>;
+  compose_apply: Record<string, unknown>;
 };
 export type ToolParams = ToolParamsByName[ToolName];
 
@@ -356,6 +389,13 @@ export type ToolResultByName = {
   remove_asset: V3StructuralResult;
   update_asset: V3StructuralResult;
   propose_outputs: V3StructuralResult;
+  brief_show: V3StructuralResult;
+  takes_list: V3StructuralResult;
+  takes_align: V3StructuralResult;
+  takes_spans: V3StructuralResult;
+  takes_span_detail: V3StructuralResult;
+  compose_validate: V3StructuralResult;
+  compose_apply: V3StructuralResult;
 };
 export type ToolResult = ToolResultByName[ToolName];
 export type V3ToolResultByName = Omit<ToolResultByName, 'get_render_state'> & {
