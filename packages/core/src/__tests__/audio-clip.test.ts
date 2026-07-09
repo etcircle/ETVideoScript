@@ -171,6 +171,45 @@ describeIfFfmpeg('trimPausesAndSilence', () => {
     const after = readFileSync(inputPath);
     expect(before.equals(after)).toBe(true);
   });
+
+  // Clone-input uses maxPauseSec=1.5 (gentle) instead of the 0.5 default, so a natural
+  // ~1.0s breath pause survives while pathological dead air still gets clipped.
+  function buildPauseFixture(pauseSec: number, name: string): string {
+    const path = join(tempDir, name);
+    spawnSync('ffmpeg', [
+      '-y',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2',
+      '-f', 'lavfi', `-i`, `aevalsrc=0:channel_layout=mono:sample_rate=48000:duration=${pauseSec}`,
+      '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=48000:duration=2',
+      '-filter_complex', '[0][1][2]concat=n=3:v=0:a=1[out]',
+      '-map', '[out]', '-acodec', 'pcm_s16le', path
+    ], { stdio: 'ignore' });
+    return path;
+  }
+
+  it('clone-prep (maxPauseSec=1.5) RETAINS a 1.0s internal pause', async () => {
+    // 2s + 1.0s pause + 2s = 5.0s. With maxPauseSec=1.5 the 1.0s pause is <= threshold,
+    // so it is left untouched → output stays ≈ the full 5.0s (only edge tolerance lost).
+    const inputPath = buildPauseFixture(1.0, 'pause-1s.wav');
+    const outputPath = join(tempDir, 'pause-1s-trimmed.wav');
+    await trimPausesAndSilence(inputPath, outputPath, { maxPauseSec: 1.5 });
+    const outputDur = probeDuration(outputPath);
+    // The 1.0s pause must survive: duration stays well above the 4.0s of pure speech.
+    expect(outputDur).toBeGreaterThan(4.7);
+  }, 30_000);
+
+  it('clone-prep (maxPauseSec=1.5) still TRIMS a 2.0s internal pause down toward the threshold', async () => {
+    // 2s + 2.0s pause + 2s = 6.0s. The 2.0s pause exceeds maxPauseSec=1.5, so ~0.5s of
+    // overflow is deleted → output is meaningfully shorter than the 6.0s input.
+    const inputPath = buildPauseFixture(2.0, 'pause-2s.wav');
+    const inputDur = probeDuration(inputPath);
+    const outputPath = join(tempDir, 'pause-2s-trimmed.wav');
+    await trimPausesAndSilence(inputPath, outputPath, { maxPauseSec: 1.5 });
+    const outputDur = probeDuration(outputPath);
+    expect(outputDur).toBeLessThan(inputDur - 0.2); // overflow beyond 1.5s was removed
+    // But ~1.5s of the pause is retained: output stays above the 4.0s of pure speech + ~1.5s.
+    expect(outputDur).toBeGreaterThan(4.9);
+  }, 30_000);
 });
 
 describeIfFfmpeg('loudnormClip', () => {

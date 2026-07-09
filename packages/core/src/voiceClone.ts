@@ -438,7 +438,13 @@ export async function cloneCleanClip(
 
   try {
     await sliceAudioWindow(refAbs, selection.start, selection.end, slicedPath);
-    await trimPausesAndSilence(slicedPath, trimmedPath);
+    // Gentle pause handling for CLONE INPUT. trimPausesAndSilence DELETES the overflow of
+    // any internal pause beyond maxPauseSec (it does not collapse — see its doc). The default
+    // 0.5s is aggressive: shaving natural breath pauses down to 0.5s teaches the clone a rushed
+    // cadence (the June evidence — same artifact family as infill's cold re-attacks). Retain up
+    // to 1.5s so ordinary inter-phrase breaths survive while pathological dead air (long dropouts)
+    // still gets clipped, keeping the sample short enough for IVC.
+    await trimPausesAndSilence(slicedPath, trimmedPath, { maxPauseSec: 1.5 });
     await loudnormClip(trimmedPath, normedPath);
 
     // Read prepared audio as buffer (voiceName was computed + validated above, pre-clone)
