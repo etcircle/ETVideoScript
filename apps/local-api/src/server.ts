@@ -269,8 +269,14 @@ function toolError(code: ToolError['code'], message: string, status = 400, manif
 // as a protocol error would skip op rollback and leak a raw error into the envelope.
 // Schema validation (enum-constrained code) rejects those, and — unlike an instanceof
 // class brand — still recognizes sticky idempotency errors after their JSON round-trip.
+// The instanceof exclusion closes the residual collision: ToolErrorSchema is a
+// non-strict z.object, so an `Error` carrying a coincidentally protocol-valid .code
+// (plus errno/path extras) would otherwise pass — and JSON-persisting it for sticky
+// replay silently drops Error's non-enumerable .message. Genuine envelopes are ALWAYS
+// plain objects (the toolError() literal above, or JSON.parse'd from the sticky
+// store); every Node value that can carry stray .code fields is an Error subclass.
 function isToolError(err: unknown): err is ToolError {
-  return ToolErrorSchema.safeParse(err).success;
+  return !(err instanceof Error) && ToolErrorSchema.safeParse(err).success;
 }
 function originAllowed(origin: string | string[] | undefined, allowedOrigins: string[]): boolean {
   const value = Array.isArray(origin) ? origin[0] : origin;

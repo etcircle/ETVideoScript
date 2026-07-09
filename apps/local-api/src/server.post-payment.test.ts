@@ -6,23 +6,22 @@ import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { createApp } from './server';
 
-// Post-payment fs-failure harness: the provider call SUCCEEDS (ledger row 'succeeded'),
-// then the next step throws a Node fs error carrying .code='ENOENT'. Node errors also
-// have a string .code, so a loose `'code' in err` guard would misread them as protocol
-// ToolErrors — skipping op rollback, skipping the sticky record (paid retry re-executes!),
-// and emitting a malformed envelope. This file pins the strict-guard contract. The mock
-// targets ffprobeDurationSecOrZero (the first post-synthesis step in the agent path);
-// everything else passes through to the real core module.
+// Post-payment failure harness: the provider call SUCCEEDS (ledger row 'succeeded'),
+// then the next step throws a raw Error carrying a string .code. Node fs errors
+// (ENOENT) satisfy a loose `'code' in err` guard; an Error whose .code happens to be
+// a protocol-VALID enum value ('internal_error') even satisfies a non-strict schema
+// parse. Either misread skips op rollback, skips the sticky record (paid retry
+// re-executes!), and emits a malformed envelope — the sticky JSON round-trip would
+// also drop Error's non-enumerable .message. This file pins the strict-guard contract
+// for BOTH imposters. The mock targets ffprobeDurationSecOrZero (the first
+// post-synthesis step in the agent path); everything else passes through to the real
+// core module; each test installs its own error factory.
+let makePostSynthesisError: (filePath: string) => Error;
 vi.mock('@etvideoscript/core', async (importOriginal) => {
   const mod = await importOriginal<typeof import('@etvideoscript/core')>();
   return {
     ...mod,
-    ffprobeDurationSecOrZero: vi.fn((filePath: string) => {
-      const err = new Error(`ENOENT: no such file or directory, stat '${filePath}'`) as NodeJS.ErrnoException;
-      err.code = 'ENOENT';
-      err.errno = -2;
-      throw err;
-    })
+    ffprobeDurationSecOrZero: vi.fn((filePath: string) => { throw makePostSynthesisError(filePath); })
   };
 });
 
@@ -59,8 +58,12 @@ function toneWav(durationSec: number): Buffer {
   return buffer;
 }
 
-describe('agent voice_patch post-payment fs failure', () => {
-  it('wraps a Node ENOENT after paid success into a proper tool_error, rolls the op back, and stays sticky', async () => {
+// Shared scenario: synthesize successfully, fail the first post-synthesis step with
+// `makeError`, then assert the strict-guard contract end to end (wrapped envelope,
+// rollback, audit row, sticky no-recharge retry).
+async function runPostPaymentScenario(requestId: string, makeError: (filePath: string) => Error, expectFragment: string) {
+  makePostSynthesisError = makeError;
+  {
     const root = mkdtempSync(join(tmpdir(), 'etvideo-agent-postpay-'));
     const app = createApp(config(root, { enableAgent: true, terminalToken: 'test-token' }));
     const audio = toneWav(1);
@@ -102,29 +105,29 @@ describe('agent voice_patch post-payment fs failure', () => {
 
       ws.send(JSON.stringify({ kind: 'hello', id: 'hello-1', protocolVersion: 3, agent: { name: 'vitest' } }));
       await recv();
-      const callParams = { requestId: 'req-xai-postpay-1', type: 'voice_patch', target: { kind: 'clip-span', trackId: 'track_video_001', clipId: 'clip_001', start: 0, end: 1 }, text: 'paid words', provider: 'xai', voice: 'eve' };
-      ws.send(JSON.stringify({ kind: 'tool_call', id: 'postpay-1', protocolVersion: 3, tool: 'propose_operation', params: callParams }));
+      const callParams = { requestId, type: 'voice_patch', target: { kind: 'clip-span', trackId: 'track_video_001', clipId: 'clip_001', start: 0, end: 1 }, text: 'paid words', provider: 'xai', voice: 'eve' };
+      ws.send(JSON.stringify({ kind: 'tool_call', id: `${requestId}-call-1`, protocolVersion: 3, tool: 'propose_operation', params: callParams }));
       const failed = await recv();
-      // Well-formed protocol envelope, not a raw Node error: the ENOENT must be wrapped.
+      // Well-formed protocol envelope, not a raw thrown Error: the failure must be wrapped.
       expect(failed.kind).toBe('tool_error');
       expect(failed.error.code).toBe('paid_provider_failed');
       expect(failed.error.status).toBe(500);
-      expect(failed.error.message).toContain('ENOENT');
+      expect(failed.error.message).toContain(expectFragment);
       // Op rolled back — not stranded in 'proposed'.
-      const op = loadManifestV3(workspace).operations.find((candidate: any) => candidate.providerRequestId === 'req-xai-postpay-1') as any;
+      const op = loadManifestV3(workspace).operations.find((candidate: any) => candidate.providerRequestId === requestId) as any;
       expect(op?.status).toBe('rejected');
       // Money was spent (provider row 'succeeded') and the attach failed — audit row present.
       const lines = readFileSync(join(workspace, 'logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-      expect(lines.filter((line) => line.requestId === 'req-xai-postpay-1').map((line) => line.status)).toEqual(['approved', 'started', 'succeeded', 'op_update_failed']);
+      expect(lines.filter((line) => line.requestId === requestId).map((line) => line.status)).toEqual(['approved', 'started', 'succeeded', 'op_update_failed']);
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       // Sticky: retrying the same requestId replays the stored terminal error and must
       // NOT re-execute the paid provider.
-      ws.send(JSON.stringify({ kind: 'tool_call', id: 'postpay-2', protocolVersion: 3, tool: 'propose_operation', params: callParams }));
+      ws.send(JSON.stringify({ kind: 'tool_call', id: `${requestId}-call-2`, protocolVersion: 3, tool: 'propose_operation', params: callParams }));
       const replayed = await recv();
       expect(replayed.kind).toBe('tool_error');
       expect(replayed.error.code).toBe('paid_provider_failed');
-      expect(replayed.error.message).toContain('ENOENT');
+      expect(replayed.error.message).toContain(expectFragment);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
@@ -133,5 +136,25 @@ describe('agent voice_patch post-payment fs failure', () => {
       await app.close();
       rmSync(root, { recursive: true, force: true });
     }
+  }
+}
+
+describe('agent voice_patch post-payment failure (strict ToolError guard)', () => {
+  it('wraps a Node ENOENT after paid success into a proper tool_error, rolls the op back, and stays sticky', async () => {
+    await runPostPaymentScenario('req-xai-postpay-1', (filePath) => {
+      const err = new Error(`ENOENT: no such file or directory, stat '${filePath}'`) as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      err.errno = -2;
+      return err;
+    }, 'ENOENT');
+  });
+
+  it('rejects an Error imposter whose .code is a protocol-valid enum value ("internal_error")', async () => {
+    // ToolErrorSchema is a non-strict z.object; without the instanceof exclusion this
+    // Error would parse as a protocol envelope — passing through raw (skipping the
+    // rollback + sticky record) and losing its non-enumerable .message on the sticky
+    // JSON round-trip.
+    await runPostPaymentScenario('req-xai-postpay-2', () =>
+      Object.assign(new Error('boom after payment'), { code: 'internal_error', status: 500, errno: -2, path: '/x' }), 'boom after payment');
   });
 });
