@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, appendFileSync, copyFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assertInside, loadProject, saveProject, sha256File, nowIso } from './filesystem';
+import { assertInside, loadProject, saveProject, sha256File, nowIso, writeDerivativeStaged } from './filesystem';
 import { appendJobStatus, makeJobId } from './jobs';
 import { ClipSourceMetadataSchema } from './schemas';
 import { extractClipWaveformPeaks, extractWaveformPeaks } from './waveform';
@@ -221,7 +221,9 @@ export async function extractAudio(workspacePath: string, options: { format?: 'w
   }
   mkdirSync(join(workspace, 'media'), { recursive: true });
   const codec = format === 'wav' ? ['-acodec', 'pcm_s16le'] : ['-codec:a', 'libmp3lame', '-b:a', '96k'];
-  run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(options.sampleRate || 16000), ...codec, output], workspace);
+  // Staged write (not ffmpeg -y at the destination): a pre-planted symlink at `output` must be
+  // REPLACED, never written through — this regeneration runs automatically off sidecar staleness.
+  writeDerivativeStaged(output, (stage) => run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(options.sampleRate || 16000), ...codec, stage], workspace));
   writeChannelFixSidecar(output, sourceChannel);
   const outputs = [outputRel];
   if (format === 'wav') {
@@ -257,7 +259,8 @@ export async function extractClipAudio(workspacePath: string, clipId: string, op
   }
   mkdirSync(join(workspace, 'media', clipId), { recursive: true });
   const codec = format === 'wav' ? ['-acodec', 'pcm_s16le'] : ['-codec:a', 'libmp3lame', '-b:a', '96k'];
-  run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(options.sampleRate || 16000), ...codec, output], workspace);
+  // Staged write — same symlink defense as extractAudio above.
+  writeDerivativeStaged(output, (stage) => run('ffmpeg', ['-y', '-i', source, '-vn', ...monoDownmixArgs(sourceChannel, source), '-ar', String(options.sampleRate || 16000), ...codec, stage], workspace));
   writeChannelFixSidecar(output, sourceChannel);
   const outputs = [outputRel];
   if (format === 'wav') { extractClipWaveformPeaks(workspace, clipId); outputs.push(`media/${clipId}/peaks.json`); }

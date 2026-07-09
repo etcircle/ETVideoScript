@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, copyFileSync, readdirSync, statSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, copyFileSync, readdirSync, rmSync, statSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, relative, basename } from 'node:path';
 import { Project, ProjectSchema, ProjectSchemaV1 } from './schemas';
 import { ManifestV3Schema, type ManifestV3 } from './manifest/schema';
@@ -82,6 +82,26 @@ export function atomicWriteJson(path: string, value: unknown, mode?: number): vo
 
 export function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T;
+}
+
+/**
+ * Stage-then-rename for derivative files produced by EXTERNAL writers (ffmpeg): the
+ * writer outputs into a private temp dir (mkdtemp → unguessable name, 0700) on the
+ * SAME filesystem as `output`, then renameSync REPLACES any pre-planted symlink at
+ * `output` instead of writing through it into the link's target — `ffmpeg -y` straight
+ * at the destination would follow the symlink and clobber an arbitrary file during
+ * automatic sidecar-driven regeneration, without any --yes gate. Same defense as
+ * extractFullBandReference and writeChannelFixSidecar already use.
+ */
+export function writeDerivativeStaged(output: string, write: (stagePath: string) => void): void {
+  const tempDir = mkdtempSync(join(dirname(output), '.stage-'));
+  try {
+    const stage = join(tempDir, basename(output));
+    write(stage);
+    renameSync(stage, output);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 export async function createWorkspace(input: { workspacePath: string; projectId: string; title: string }): Promise<Project> {
