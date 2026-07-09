@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -156,6 +156,7 @@ describe('extractAudioAssetInWorkspace keeps the manifest asset in sync with a r
     // bumps input/source.mp4's mtime past the existing derivative's, forcing a re-extract.
     await importSource(workspace, makeOneSidedVideoWithDuration(dir, 'long.mp4', 2), { replace: true });
 
+    const revisionsBefore = readdirSync(join(workspace, 'edits/revisions')).filter((n) => /^manifest-\d{4}\.json$/.test(n)).length;
     const second = detachAudioInWorkspaceV3(workspace, { clipId: 'clip_001', refresh: true });
     expect(second.asset.assetId).toBe(first.asset.assetId);
     // The re-extracted bytes now cover the full 2s recording — the manifest record must
@@ -166,5 +167,9 @@ describe('extractAudioAssetInWorkspace keeps the manifest asset in sync with a r
     // on the refresh path, so detachAudioInWorkspace itself is responsible for the write.
     const reloaded = loadManifestV3(workspace);
     expect(reloaded.assets.find((a) => a.assetId === second.asset.assetId)?.durationSec).toBeCloseTo(2, 1);
+    // ...and the write must snapshot a revision first (workspace contract): revision: false
+    // here would silently satisfy the reload assertion above while breaking reversibility.
+    const revisionsAfter = readdirSync(join(workspace, 'edits/revisions')).filter((n) => /^manifest-\d{4}\.json$/.test(n)).length;
+    expect(revisionsAfter).toBe(revisionsBefore + 1);
   }, 60_000);
 });
