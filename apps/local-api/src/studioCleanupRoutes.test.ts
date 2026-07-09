@@ -122,4 +122,35 @@ describe('studio-cleanup route', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('omits the fingerprint entirely when the refresh fails and no sidecar describes the bytes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-api-studiocleanup-nosidecar-'));
+    const app = createApp(config(root));
+    try {
+      const workspace = join(root, 'episode-001');
+      await createWorkspace({ workspacePath: workspace, projectId: 'episode-001', title: 'Episode 001' });
+
+      // Same failed-refresh setup as above, but pre-sidecar legacy bytes: nothing on disk
+      // records which mix they contain. The route must NOT guess — it omits the field, and
+      // an absent fingerprint next to an existing audioChannelFix record reads as stale.
+      mkdirSync(join(workspace, 'media'), { recursive: true });
+      writeFileSync(join(workspace, 'media/extracted-audio.wav'), wavSilence(200));
+
+      const manifest = loadManifestV3(workspace);
+      manifest.audioChannelFix = { status: 'approved', sourceChannel: 'left', detection: { leftRmsDb: -20, rightRmsDb: -80, auto: true }, appliedAt: new Date().toISOString() };
+      saveManifestV3(workspace, manifest, { revision: false });
+
+      const res = await app.inject({ method: 'POST', url: '/api/projects/episode-001/manifest/studio-cleanup', payload: {} });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.studioCleanup.status).toBe('approved');
+      expect(body.studioCleanup.audioChannelFixFingerprint).toBeUndefined();
+      expect(loadManifestV3(workspace).studioCleanup?.audioChannelFixFingerprint).toBeUndefined();
+      const plan = buildRenderPlanV3(loadManifestV3(workspace));
+      expect(plan.studioCleanupStale).toBe(true);
+    } finally {
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
