@@ -4,11 +4,12 @@ import { randomBytes } from 'node:crypto';
 import { assertInside } from './filesystem';
 import { extractFullBandReference } from './media';
 import { loadTranscript } from './transcript';
-import { cloneCartesiaVoice } from './providers';
+import { cloneCartesiaVoice, cloneElevenLabsVoice, type VoiceCloneSample } from './providers';
 import {
   readVoicesLibrary,
   upsertVoice,
   type VoiceRecord,
+  type VoiceProvider,
   type SettingsPathsInput
 } from './providerSettings';
 import type { TranscriptWords } from './schemas';
@@ -32,6 +33,34 @@ function windowOverlaps(
   return c.clipId === ex.clipId && c.start < ex.end && c.end > ex.start;
 }
 import { sliceAudioWindow, trimPausesAndSilence, loudnormClip } from './audioClip';
+
+// ── Clone-provider dispatch ──────────────────────────────────────────────────────
+// Mirrors the CLONE_PROVIDERS table in apps/local-api settingsRoutes.ts so cloneCleanClip
+// dispatches by the SAME provider identity the /voices/clone route uses (no divergent
+// second dispatch). Both adapters return { voiceId } and accept this exact call shape;
+// Cartesia's extra optionals (language/baseUrl/timeoutMs) default inside its adapter, and
+// baseUrl is threaded through where the caller supplies one. Typed (no `any`) so a
+// signature drift in either adapter is caught at compile time.
+//
+// maxSamples encodes the provider's clip capability. WIRING ONLY: cloneCleanClip prepares a
+// SINGLE window today and submits it as one sample regardless of provider — the multi-window
+// scorer that would fill EL's 25-sample budget is future work and deliberately NOT built here.
+// EL simply accepts the one prepared window as one sample (well under its 25 cap).
+type CloneFn = (input: {
+  name: string;
+  samples: VoiceCloneSample[];
+  secret: string;
+  baseUrl?: string;
+  signal: AbortSignal;
+}) => Promise<{ voiceId: string }>;
+const CLONE_PROVIDERS: Record<VoiceProvider, { clone: CloneFn; maxSamples: number }> = {
+  elevenlabs: { clone: cloneElevenLabsVoice, maxSamples: 25 },
+  cartesia: { clone: cloneCartesiaVoice, maxSamples: 1 }
+};
+// Default clone provider. Kept in lock-step with the /voices/clone route default
+// (settingsRoutes.ts: `fields.provider ?? 'elevenlabs'`). Do NOT flip this independently —
+// the consent-gated default flip is a separate wave that must move both call sites together.
+const DEFAULT_CLONE_PROVIDER: VoiceProvider = 'elevenlabs';
 
 // ── Constants (locked defaults) ────────────────────────────────────────────────
 const TARGET_SEC = 10;
@@ -76,6 +105,11 @@ export interface CloneCleanClipParams {
   referenceRange?: { clipId: string; start: number; end: number };
   target?: { clipId: string; start: number; end: number };
   name?: string;
+  // Clone provider. Optional; resolves to DEFAULT_CLONE_PROVIDER ('elevenlabs', matching the
+  // /voices/clone route default) so callers that don't care get the route's behavior. The
+  // `secret`/`baseUrl` supplied must belong to THIS provider — cloneCleanClip does not read
+  // secrets; the caller resolves them per provider (same as the route).
+  provider?: VoiceProvider;
   secret: string;
   baseUrl?: string;
   signal: AbortSignal;
@@ -317,6 +351,7 @@ function findCachedVoice(
   settingsInput: SettingsPathsInput,
   projectId: string | undefined,
   scope: 'local' | 'project',
+  provider: VoiceProvider,
   range: { clipId: string; start: number; end: number }
 ): VoiceRecord | null {
   // Cache reuse is strictly project-scoped. The voices library is GLOBAL, so without a
@@ -326,7 +361,11 @@ function findCachedVoice(
   if (!projectId) return null;
   const library = readVoicesLibrary(settingsInput).value;
   for (const v of library.voices) {
-    if (v.provider !== 'cartesia') continue;
+    // Per-provider match: an EL clone must never be reused for a Cartesia request (or vice
+    // versa) — the voiceId is provider-namespaced and the speaker identity differs. Legacy
+    // records carry provider: 'cartesia' (upsertVoice always set it), so a Cartesia request
+    // still cache-hits them here — backward-compatible, no migration needed.
+    if (v.provider !== provider) continue;
     if (v.cloneScope !== scope) continue;
     if (v.originProjectId !== projectId) continue;
     const sar = v.sourceAudioRange;
@@ -346,6 +385,11 @@ export async function cloneCleanClip(
   params: CloneCleanClipParams & SettingsPathsInput & { projectId?: string }
 ): Promise<CloneCleanClipResult> {
   const workspace = resolve(workspacePath);
+
+  // Resolve the clone provider the same way the route does (default 'elevenlabs').
+  const provider: VoiceProvider = params.provider ?? DEFAULT_CLONE_PROVIDER;
+  const cloneCfg = CLONE_PROVIDERS[provider];
+  if (!cloneCfg) throw new Error(`cloneCleanClip: unsupported clone provider "${provider}".`);
 
   // Determine the selection
   let selection: CleanClipSelection;
@@ -384,7 +428,7 @@ export async function cloneCleanClip(
 
   // Cache check: look for an existing voice with matching scope/project/range
   const settingsInput: SettingsPathsInput = { homeDir: params.homeDir, workspacePath: params.workspacePath, etvsDir: params.etvsDir };
-  const cached = findCachedVoice(settingsInput, params.projectId, selection.scope, {
+  const cached = findCachedVoice(settingsInput, params.projectId, selection.scope, provider, {
     clipId: selection.clipId,
     start: selection.start,
     end: selection.end
@@ -450,7 +494,11 @@ export async function cloneCleanClip(
     // Read prepared audio as buffer (voiceName was computed + validated above, pre-clone)
     const audio = readFileSync(normedPath);
 
-    const cloneResult = await cloneCartesiaVoice({
+    // Provider-dispatched clone. WIRING ONLY: exactly one prepared window is submitted as a
+    // single sample for EVERY provider — behavior is identical to the old Cartesia-hardwired
+    // path (which also sent one sample). EL accepts the one sample (well under its 25 cap);
+    // filling EL's multi-sample budget is future work (the multi-window scorer), not this wave.
+    const cloneResult = await cloneCfg.clone({
       name: voiceName,
       samples: [{ audio, fileName: 'clip.wav', mimeType: 'audio/wav' }],
       secret: params.secret,
@@ -459,16 +507,16 @@ export async function cloneCleanClip(
     });
 
     // The provider handle must fit VoiceRecordSchema (voiceId max 128) or upsertVoice throws
-    // AFTER the remote clone exists. cloneCartesiaVoice already guarantees a non-empty trimmed
-    // string; guard the length too for a clear error rather than a schema stack trace.
-    if (cloneResult.voiceId.length > 128) throw new Error('cloneCleanClip: Cartesia returned a voice id longer than 128 chars; the remote clone was created but cannot be persisted locally.');
+    // AFTER the remote clone exists. Both adapters guarantee a non-empty trimmed string; guard
+    // the length too for a clear error rather than a schema stack trace.
+    if (cloneResult.voiceId.length > 128) throw new Error(`cloneCleanClip: ${provider} returned a voice id longer than 128 chars; the remote clone was created but cannot be persisted locally.`);
     const voiceId = `voice-${randomBytes(4).toString('hex')}`;
     const voice = upsertVoice({
       ...settingsInput,
       voice: {
         id: voiceId,
         name: voiceName,
-        provider: 'cartesia',
+        provider,
         voiceId: cloneResult.voiceId,
         ...(params.projectId ? { originProjectId: params.projectId } : {}),
         cloneScope: selection.scope,
