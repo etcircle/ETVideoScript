@@ -256,9 +256,13 @@ describeIfFfmpeg('cloneCleanClip — provider-dispatched clone', () => {
     expect(hitA.voice.voiceId).toBe('el_acct_a_voice');
   }, 60_000);
 
-  it('legacy record WITHOUT accountRef still hits an account-tagged request (no orphaning)', async () => {
+  it('tagged request does NOT reuse an untagged legacy record → cache miss, fresh clone (symmetric tag classes)', async () => {
     const range = { clipId: 'clip_001', start: 4, end: 9 };
-    // Legacy/unscoped record: no accountRef field at all.
+    // Legacy/unscoped record: no accountRef field at all. It could have been created under
+    // ANY account, so a request that explicitly identifies its account must not reuse it —
+    // the voiceId may not exist in the requester's account (or worse, on a shared endpoint,
+    // may resolve to a different user's voice). Matching is symmetric by tag class:
+    // tagged↔tagged (identical value), untagged↔untagged, never across classes.
     upsertVoice({
       ...settingsInput,
       voice: {
@@ -267,13 +271,50 @@ describeIfFfmpeg('cloneCleanClip — provider-dispatched clone', () => {
         provenance: { method: 'ivc', createdBy: 'clone-route' }
       }
     });
-    (globalThis as any).fetch = vi.fn(async () => { throw new Error('legacy unscoped record must match any account'); });
-    const hit = await cloneCleanClip(workspace, {
+    const calls: string[] = [];
+    (globalThis as any).fetch = vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ id: 'cart_fresh_tagged_voice' }), {
+        status: 200, headers: { 'content-type': 'application/json' }
+      });
+    });
+    const result = await cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-unscoped', scope: 'project', provider: 'cartesia',
       accountRef: 'cartesia:some-new-account',
       referenceRange: range, secret: 'cart-key', signal: new AbortController().signal
     });
-    expect(hit.cached).toBe(true);
-    expect(hit.voice.voiceId).toBe('cart_unscoped_voice');
+    expect(result.cached).toBe(false);
+    expect(result.voice.voiceId).toBe('cart_fresh_tagged_voice');
+    expect(result.voice.accountRef).toBe('cartesia:some-new-account');
+    expect(calls.length).toBeGreaterThan(0);
+    // The untagged legacy record is untouched and still present for untagged requests.
+    expect(readVoicesLibrary(settingsInput).value.voices.some((v) => v.id === 'voice-unscoped')).toBe(true);
+  }, 60_000);
+
+  it('preflight rejects a blank accountRef BEFORE any remote call', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-preflight', scope: 'project', provider: 'elevenlabs',
+      accountRef: '',
+      referenceRange: { clipId: 'clip_001', start: 1, end: 8 },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/accountRef must be non-empty/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('preflight rejects a >200-char accountRef BEFORE any remote call', async () => {
+    // Without the preflight this would consume a provider voice slot and then fail
+    // upsertVoice's schema (accountRef max 200), stranding the remote clone with no local
+    // cache record.
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-preflight', scope: 'project', provider: 'elevenlabs',
+      accountRef: 'a'.repeat(201),
+      referenceRange: { clipId: 'clip_001', start: 1, end: 8 },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/accountRef exceeds the 200-character limit/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   }, 60_000);
 });

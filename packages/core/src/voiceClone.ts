@@ -392,12 +392,21 @@ function findCachedVoice(
     // records carry provider: 'cartesia' (upsertVoice always set it), so a Cartesia request
     // still cache-hits them here — backward-compatible, no migration needed.
     if (v.provider !== provider) continue;
-    // Per-account match: a voiceId only exists in the account that created it, so a record
-    // written under accountRef X must not satisfy a request under account Y (the reuse would
-    // 404 — or worse, resolve to a different user's voice on a shared endpoint). Records
-    // WITHOUT accountRef are legacy/account-unscoped and keep matching any request (do not
-    // orphan existing caches); only an EXPLICITLY account-tagged record demands equality.
-    if (v.accountRef !== undefined && v.accountRef !== accountRef) continue;
+    // Per-account match — SYMMETRIC by tag class. A voiceId only exists in the account that
+    // created it, so:
+    //   • tagged request  → matches ONLY records with the IDENTICAL accountRef (an untagged
+    //     legacy record could have been created under ANY account; reusing it from a tagged
+    //     request would 404 in the requester's account — or worse, resolve to a different
+    //     user's voice on a shared endpoint);
+    //   • untagged request → matches ONLY untagged records (preserves legacy single-account
+    //     behavior among legacy records; disabling untagged↔untagged would silently re-clone
+    //     and burn a voice slot for the common single-account setup).
+    // Never match across tag classes in either direction. Residual known limit: two accounts
+    // BOTH making untagged requests are indistinguishable — callers that switch accounts must
+    // tag their requests (the future route caller always will). Strict !== implements exactly
+    // class-then-value equality: undefined===undefined for the untagged class, string
+    // equality within the tagged class.
+    if (v.accountRef !== accountRef) continue;
     if (v.cloneScope !== scope) continue;
     if (v.originProjectId !== projectId) continue;
     const sar = v.sourceAudioRange;
@@ -428,8 +437,11 @@ export async function cloneCleanClip(
   // identifier; fall back to the baseUrl host (a non-default endpoint implies a distinct
   // tenant). NEVER derived from the secret value. Undefined ⇒ account-unscoped record
   // (legacy-equivalent matching semantics in findCachedVoice).
-  let accountRef: string | undefined = params.accountRef;
-  if (accountRef === undefined && params.baseUrl) {
+  // Trim here so cache matching and the persisted record see one canonical form. An
+  // explicitly-provided-but-blank accountRef is a caller bug and is rejected in the
+  // preflight below — it does NOT silently fall back to the baseUrl derivation.
+  let accountRef: string | undefined = params.accountRef?.trim();
+  if (params.accountRef === undefined && params.baseUrl) {
     try { accountRef = new URL(params.baseUrl).host; } catch { /* malformed baseUrl fails later in the adapter with a clearer error */ }
   }
 
@@ -488,6 +500,12 @@ export async function cloneCleanClip(
   if (voiceName.length < 1 || voiceName.length > 200) throw new Error(`cloneCleanClip: voice name must be 1–200 characters (got ${voiceName.length}).`);
   if (selection.clipId.length > 128) throw new Error(`cloneCleanClip: clipId "${selection.clipId}" exceeds the 128-character sourceAudioRange limit.`);
   if (params.projectId !== undefined && params.projectId.length > 200) throw new Error('cloneCleanClip: projectId exceeds the 200-character originProjectId limit.');
+  // accountRef preflight — same rationale as the fields above: VoiceRecordSchema requires
+  // 1..200 chars when present, and upsertVoice only runs AFTER the remote clone succeeds. An
+  // invalid accountRef must fail HERE, not consume a provider voice slot and then strand the
+  // clone with no local cache record.
+  if (accountRef !== undefined && accountRef.length === 0) throw new Error('cloneCleanClip: accountRef must be non-empty when provided (it is the cache\'s account discriminator; omit it entirely for an account-unscoped clone).');
+  if (accountRef !== undefined && accountRef.length > 200) throw new Error(`cloneCleanClip: accountRef exceeds the 200-character limit (got ${accountRef.length}).`);
 
   // Extract 48k full-band reference (never the 16k STT copy)
   const refRel = await extractFullBandReference(workspace, selection.clipId);

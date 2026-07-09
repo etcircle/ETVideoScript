@@ -239,4 +239,70 @@ describe('VoicesFileSchema handle dedupe — multi-clone safety', () => {
       cleanup(root);
     }
   });
+
+  // Handle is (provider, accountRef, voiceId): provider-local voice IDs are only unique
+  // WITHIN one account, so the same voiceId under two different accounts is two distinct
+  // voices and must both persist — rejecting the second would strand a paid remote clone.
+  it('same provider+voiceId under two DIFFERENT accountRefs both persist', () => {
+    const root = tempRoot();
+    try {
+      upsertVoice({
+        homeDir: root,
+        voice: {
+          id: 'acct-a-voice', name: 'A', provider: 'elevenlabs', voiceId: 'el_shared_id',
+          accountRef: 'elevenlabs:acct-a'
+        } as any
+      });
+      upsertVoice({
+        homeDir: root,
+        voice: {
+          id: 'acct-b-voice', name: 'B', provider: 'elevenlabs', voiceId: 'el_shared_id',
+          accountRef: 'elevenlabs:acct-b'
+        } as any
+      });
+      const library = readVoicesLibrary({ homeDir: root }).value;
+      expect(library.voices).toHaveLength(2);
+      expect(library.voices.map((v) => v.accountRef).sort()).toEqual(['elevenlabs:acct-a', 'elevenlabs:acct-b']);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it('same provider+accountRef+voiceId is still rejected as a duplicate handle', () => {
+    const root = tempRoot();
+    try {
+      upsertVoice({
+        homeDir: root,
+        voice: {
+          id: 'dup-1', name: 'Dup 1', provider: 'elevenlabs', voiceId: 'el_dup_id',
+          accountRef: 'elevenlabs:acct-a'
+        } as any
+      });
+      expect(() => upsertVoice({
+        homeDir: root,
+        voice: {
+          id: 'dup-2', name: 'Dup 2', provider: 'elevenlabs', voiceId: 'el_dup_id',
+          accountRef: 'elevenlabs:acct-a'
+        } as any
+      })).toThrow(/already registered/);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it('legacy untagged duplicates (no accountRef) are still rejected — untagged is its own class', () => {
+    const root = tempRoot();
+    try {
+      upsertVoice({
+        homeDir: root,
+        voice: { id: 'legacy-1', name: 'L1', provider: 'cartesia', voiceId: 'cart_legacy_id' } as any
+      });
+      expect(() => upsertVoice({
+        homeDir: root,
+        voice: { id: 'legacy-2', name: 'L2', provider: 'cartesia', voiceId: 'cart_legacy_id' } as any
+      })).toThrow(/already registered/);
+    } finally {
+      cleanup(root);
+    }
+  });
 });

@@ -162,9 +162,15 @@ export const VoicesFileSchema = z.object({
   updatedAt: z.string().min(1)
 }).superRefine((file, ctx) => {
   // Hand-edited voices.json can introduce duplicates that upsertVoice would never produce.
-  // Surface both kinds: same library slug (UI delete ambiguity), and same (provider, voiceId)
-  // pair across multiple slugs (the same upstream voice registered twice — likely user error
-  // and confuses the picker).
+  // Surface both kinds: same library slug (UI delete ambiguity), and the same upstream voice
+  // registered twice (likely user error and confuses the picker). The upstream-voice handle
+  // is (provider, accountRef, voiceId): provider-local voice IDs are only unique WITHIN one
+  // account, so the same voiceId under two DIFFERENT accounts is two legitimately distinct
+  // voices — rejecting the second would fail persistence AFTER a paid remote clone succeeded
+  // (stranded clone). Untagged records use '' as their own account class (consistent with
+  // cloneCleanClip's symmetric tag-class cache matching); accountRef itself is min-1-char,
+  // so '' can never collide with a real tag, and legacy voices.json files (no accountRef
+  // anywhere) validate exactly as before.
   const seenIds = new Set<string>();
   const seenHandles = new Map<string, string>();
   file.voices.forEach((voice, index) => {
@@ -172,7 +178,7 @@ export const VoicesFileSchema = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['voices', index, 'id'], message: `duplicate voice id: ${voice.id}` });
     }
     seenIds.add(voice.id);
-    const handle = `${voice.provider}:${voice.voiceId}`;
+    const handle = `${voice.provider}:${voice.accountRef ?? ''}:${voice.voiceId}`;
     const priorId = seenHandles.get(handle);
     if (priorId) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['voices', index, 'voiceId'], message: `voice handle ${handle} is already registered as ${priorId}` });
