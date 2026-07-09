@@ -872,6 +872,49 @@ describe('local API', () => {
     } finally { ws?.close(); await app.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('agent voice_patch degraded payload rejects with HTTP-route parity and stays sticky on retry', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-agent-'));
+    const app = createApp(config(root, { enableAgent: true, terminalToken: 'test-token' }));
+    const fetchMock = stubXai(root, 1, { silent: true });
+    let ws: WebSocket | null = null;
+    try {
+      await createTranscriptProject(app, root, 'replace these words now');
+      ws = await openAgentSocket(app);
+      const recv = wsJsonReceiver(ws);
+      sendWs(ws, { kind: 'hello', id: 'hello-1', protocolVersion: 3, agent: { name: 'vitest' } });
+      await recv();
+      const callParams = { requestId: 'req-xai-agent-silent-1', type: 'voice_patch', target: { kind: 'clip-span', trackId: 'track_video_001', clipId: 'clip_001', start: 0, end: 1 }, text: 'paid words', provider: 'xai', voice: 'eve' };
+      sendWs(ws, { kind: 'tool_call', id: 'voice-silent-1', protocolVersion: 3, tool: 'propose_operation', params: callParams });
+      const failed = await recv();
+      // Transport parity with the HTTP tooShort branch: 502 (not 500), op rejected, and
+      // the same audit trail — an op_update_failed row AFTER the provider's succeeded row.
+      expect(failed.kind).toBe('tool_error');
+      expect(failed.error.code).toBe('paid_provider_failed');
+      expect(failed.error.status).toBe(502);
+      expect(failed.error.message).toContain('implausibly short audio');
+      const workspace = join(root, 'episode-001');
+      const op = loadManifestV3(workspace).operations.find((candidate: any) => candidate.providerRequestId === 'req-xai-agent-silent-1') as any;
+      expect(op?.status).toBe('rejected');
+      const rowsFor = (lines: any[]) => lines.filter((line) => line.requestId === 'req-xai-agent-silent-1');
+      const lines = readFileSync(join(workspace, 'logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(rowsFor(lines).map((line) => line.status)).toEqual(['approved', 'started', 'succeeded', 'op_update_failed']);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Sticky failure (parity with 'keeps failed xAI POST sticky'): the same requestId
+      // replays the stored terminal error and must NOT re-execute the paid provider.
+      sendWs(ws, { kind: 'tool_call', id: 'voice-silent-2', protocolVersion: 3, tool: 'propose_operation', params: callParams });
+      const replayed = await recv();
+      expect(replayed.kind).toBe('tool_error');
+      expect(replayed.error.code).toBe('paid_provider_failed');
+      expect(replayed.error.status).toBe(502);
+      expect(replayed.error.message).toContain('implausibly short audio');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // No new ledger rows either — the replay is a read, not a new attempt.
+      const linesAfter = readFileSync(join(workspace, 'logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(rowsFor(linesAfter).length).toBe(rowsFor(lines).length);
+    } finally { ws?.close(); await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('rejects unsupported job types', async () => {
     const root = mkdtempSync(join(tmpdir(), 'etvideo-api-'));
     const app = createApp(config(root));

@@ -219,7 +219,10 @@ function providerExecutionShape(event: unknown): { type?: string; cost?: { curre
 type JobType = 'extract-audio' | 'peaks' | 'transcribe' | 'validate-manifest' | 'render-draft' | 'export-captions';
 type UploadStage = { name: string; status: 'queued' | 'waiting_for_approval' | 'running' | 'succeeded' | 'failed' | 'cancelled'; startedAt?: string; completedAt?: string; error?: string; clipId?: string; phase?: string; percent?: number };
 type AgentSocket = { send: (data: string) => void; readyState?: number; protocolVersion?: 2 | 3 };
-type AgentIdempotencyRecord = { tool: ToolName; bodyHash: string; response: ToolResponse };
+// `response` for a completed call; `error` for a terminally-failed PAID call (sticky-failure
+// parity with the HTTP route: a retry with the same requestId replays the stored error and
+// never re-executes the provider). Exactly one of the two is set.
+type AgentIdempotencyRecord = { tool: ToolName; bodyHash: string; response?: ToolResponse; error?: ToolError };
 const coreAgentToolNames = new Set<AgentToolName>(Object.keys(agentToolHandlersV3) as AgentToolName[]);
 const readOnlyAgentTools = new Set<ToolName>(['get_transcript', 'list_operations', 'get_render_state', 'propose_outputs']);
 const apiWrappedAgentTools = new Set<ToolName>(['render_draft']);
@@ -578,11 +581,26 @@ export function createApp(config: ApiConfig = loadConfig()) {
       const existing = records[params.requestId];
       if (existing) {
         if (existing.tool !== tool || existing.bodyHash !== bodyHash) throw toolError('request_id_conflict', 'requestId already used with a different body', 409, manifestContentVersion(ws));
-        return { response: existing.response, changedOperationIds: [], manifestChanged: false };
+        // Sticky failed paid call: replay the terminal error, never re-execute (money).
+        if (existing.error) throw existing.error;
+        return { response: existing.response!, changedOperationIds: [], manifestChanged: false };
       }
       const currentVersion = manifestContentVersion(ws);
       if (params.expectedManifestVersion && params.expectedManifestVersion !== currentVersion) throw toolError('stale_manifest', 'expectedManifestVersion does not match current manifest', 409, currentVersion);
-      const result = await executeAgentTool(projectId, tool, params);
+      let result;
+      try { result = await executeAgentTool(projectId, tool, params); }
+      catch (err) {
+        // Sticky-failure parity with the HTTP route ("keeps failed xAI POST sticky"): once a
+        // paid synthesis attempt has RUN, its terminal failure must be recorded so a retry
+        // with the same requestId replays the error instead of re-executing the provider.
+        // Only paid_provider_failed is persisted — pre-execution validation errors (invalid
+        // params, stale manifest) throw before this try and stay retryable by design.
+        if (typeof err === 'object' && err && (err as ToolError).code === 'paid_provider_failed') {
+          records[params.requestId] = { tool, bodyHash, error: err as ToolError };
+          writeAgentIdempotency(ws, records);
+        }
+        throw err;
+      }
       records[params.requestId] = { tool, bodyHash, response: result.response };
       writeAgentIdempotency(ws, records);
       return { ...result, manifestChanged: manifestContentVersion(ws) !== currentVersion };
@@ -634,14 +652,27 @@ export function createApp(config: ApiConfig = loadConfig()) {
         const generated = ffprobeDurationSecOrZero(assertInside(ws, speech.asset));
         const requested = end - start;
         const durationWarning = voicePatchDurationWarning(generated, requested);
-        // Same hard 100 ms degraded-payload floor as the HTTP voice-patch routes.
-        // validateLocal would reject the approve below anyway (approved patch with
-        // sub-floor durationGeneratedSec is unrepresentable); failing here first keeps
-        // the rejection reason human-readable instead of a raw validation string.
-        if (generated < 0.1) throw new Error(`TTS returned implausibly short audio (${(generated * 1000).toFixed(0)} ms for a ${(requested * 1000).toFixed(0)} ms slot). The asset was not approved; you can retry.`);
+        // Same hard 100 ms degraded-payload floor as the HTTP voice-patch routes, with the
+        // same transport-independent outcome (manifestRoutes' tooShort branch): op rejected,
+        // an op_update_failed audit row after the provider's succeeded row, and 502 (the
+        // upstream provider produced an unusable result — not an internal error). validateLocal
+        // would reject the approve below anyway (approved patch with sub-floor
+        // durationGeneratedSec is unrepresentable); failing here first keeps the rejection
+        // reason human-readable instead of a raw validation string.
+        if (generated < 0.1) {
+          const reason = `TTS returned implausibly short audio (${(generated * 1000).toFixed(0)} ms for a ${(requested * 1000).toFixed(0)} ms slot). The asset was not approved; you can retry.`;
+          updateManifestOperation(ws, operation.id, { status: 'rejected', reason });
+          const request = latestProviderRequest(ws, requestId);
+          appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: params.provider, voice: params.voice, language, text, operationId: operation.id, status: 'op_update_failed', completedAt: new Date().toISOString(), error: reason, durationGeneratedSec: generated, durationRequestedSec: requested, ...(durationWarning ? { durationWarning } : {}), start, end, ...providerExecutionShape(request) }));
+          throw toolError('paid_provider_failed', reason, 502, version());
+        }
         const updated = updateManifestOperation(ws, operation.id, { status: 'approved', asset: speech.asset, providerRequestId: requestId, durationGeneratedSec: generated, durationRequestedSec: requested, ...(durationWarning ? { durationWarning } : {}), ...(speech.seamBaked ? { seamBaked: true } : {}) });
         return { response: { result: { operation: updated, providerRequestId: requestId, asset: speech.asset }, manifestVersion: version() }, changedOperationIds };
       } catch (err) {
+        // The degraded-payload floor above throws a fully-formed ToolError after recording
+        // its own rejection + audit row — pass it through untouched (re-wrapping would both
+        // stringify it as "[object Object]" and double-write the op rejection).
+        if (typeof err === 'object' && err && 'code' in err) throw err;
         updateManifestOperation(ws, operation.id, { status: 'rejected', reason: err instanceof Error ? err.message : String(err) });
         const request = latestProviderRequest(ws, requestId);
         throw toolError('paid_provider_failed', request?.error || (err instanceof Error ? err.message : String(err)), 500, version());

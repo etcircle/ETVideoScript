@@ -24,24 +24,43 @@ export function doctor() {
   return { ffmpeg: commandAvailable('ffmpeg'), ffprobe: commandAvailable('ffprobe'), node: process.version };
 }
 
+/**
+ * ffprobe RAN and produced output, but the duration in it was not a usable number
+ * (e.g. `duration=N/A` for a zero-sample WAV container). Distinct from process-level
+ * failures (ffprobe binary missing, file unreadable), which run() surfaces as plain
+ * Errors — ffprobeDurationSecOrZero maps ONLY this class to 0.
+ */
+export class MediaDurationUnreadableError extends Error {
+  constructor(filePath: string) {
+    super(`Could not read media duration: ${filePath}`);
+    this.name = 'MediaDurationUnreadableError';
+  }
+}
+
 export function ffprobeDurationSec(filePath: string): number {
   const stdout = run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath]);
   const duration = Number(stdout.trim());
-  if (!Number.isFinite(duration) || duration < 0) throw new Error(`Could not read media duration: ${filePath}`);
+  if (!Number.isFinite(duration) || duration < 0) throw new MediaDurationUnreadableError(filePath);
   return duration;
 }
 
 /**
- * Like ffprobeDurationSec, but returns 0 instead of throwing when the duration is
+ * Like ffprobeDurationSec, but returns 0 when the probe RAN and the duration was
  * unreadable. For freshly-synthesized TTS assets: a payload that was pure silence
  * gets silence-trimmed (tts.ts trimSilenceInPlace) down to a zero-sample WAV whose
  * container ffprobe reports as duration=N/A. That is a DEGRADED PAYLOAD, not an
  * internal error — callers route the 0 through their existing sub-100 ms floor so
  * the op is rejected cleanly (same defense as the ~50 ms ElevenLabs near-silence
- * case) instead of surfacing a raw 500 from the probe.
+ * case) instead of surfacing a raw 500 from the probe. Process/filesystem failures
+ * (missing ffprobe binary, missing file, permissions) still propagate — mapping
+ * them to 0 would misreport real local infra breakage as "provider returned 0 ms".
  */
 export function ffprobeDurationSecOrZero(filePath: string): number {
-  try { return ffprobeDurationSec(filePath); } catch { return 0; }
+  try { return ffprobeDurationSec(filePath); }
+  catch (err) {
+    if (err instanceof MediaDurationUnreadableError) return 0;
+    throw err;
+  }
 }
 
 export function ffprobe(filePath: string) {
