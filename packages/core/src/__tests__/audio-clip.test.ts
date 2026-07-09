@@ -208,6 +208,55 @@ describeIfFfmpeg('loudnormClip', () => {
     const after = readFileSync(inputWav);
     expect(before.equals(after)).toBe(true);
   });
+
+  it('normalizes toward the clone-input band (I≈-20 LUFS, TP≤-3 dBTP)', async () => {
+    // Measure the OUTPUT — never trust the filter string alone. Re-run loudnorm in
+    // measurement mode (print_format=json on a dry-run pass) so ffmpeg reports the
+    // achieved integrated loudness + true peak of the already-normalized clip.
+    // These are the numbers EL's IVC guidance cares about: I in the −23..−18 band and
+    // true peak at −3. loudnorm's single-pass output lands close, not exact, so allow a
+    // generous tolerance (single-pass loudnorm is a level target, not a precise match).
+    const outPath = join(tempDir, 'normed-measured.wav');
+    await loudnormClip(inputWav, outPath);
+    const measure = spawnSync('ffmpeg', [
+      '-hide_banner', '-nostats',
+      '-i', outPath,
+      '-af', 'loudnorm=I=-20:TP=-3:print_format=json',
+      '-f', 'null', '-'
+    ], { encoding: 'utf8' });
+    // loudnorm prints the JSON block to stderr.
+    const stderr = measure.stderr ?? '';
+    const jsonStart = stderr.lastIndexOf('{');
+    const jsonEnd = stderr.lastIndexOf('}');
+    expect(jsonStart).toBeGreaterThanOrEqual(0);
+    const parsed = JSON.parse(stderr.slice(jsonStart, jsonEnd + 1)) as { input_i: string; input_tp: string };
+    const measuredI = Number(parsed.input_i);
+    const measuredTp = Number(parsed.input_tp);
+    // Integrated loudness sits inside the clone-input band (allow ±3 LU single-pass slop).
+    expect(measuredI).toBeGreaterThan(-23);
+    expect(measuredI).toBeLessThan(-17);
+    // True peak stays at/under the −3 dBTP ceiling (small headroom tolerance).
+    expect(measuredTp).toBeLessThan(-2.0);
+  }, 30_000);
+
+  it('honors an explicit target override', async () => {
+    // The parameter path must actually change the filter behavior, not just the default.
+    const outPath = join(tempDir, 'normed-override.wav');
+    await loudnormClip(inputWav, outPath, { integratedLufs: -16, truePeakDb: -1.5 });
+    const measure = spawnSync('ffmpeg', [
+      '-hide_banner', '-nostats',
+      '-i', outPath,
+      '-af', 'loudnorm=I=-16:TP=-1.5:print_format=json',
+      '-f', 'null', '-'
+    ], { encoding: 'utf8' });
+    const stderr = measure.stderr ?? '';
+    const jsonStart = stderr.lastIndexOf('{');
+    const jsonEnd = stderr.lastIndexOf('}');
+    const parsed = JSON.parse(stderr.slice(jsonStart, jsonEnd + 1)) as { input_i: string };
+    // Overridden to the old broadcast target → measured loudness sits well above the
+    // clone-input band, proving the override actually drove ffmpeg differently.
+    expect(Number(parsed.input_i)).toBeGreaterThan(-19);
+  }, 30_000);
 });
 
 describeIfFfmpeg('clone-path isolation — no 16k STT or source mutation', () => {

@@ -88,19 +88,35 @@ export async function trimPausesAndSilence(
   }
 }
 
-// Single-pass loudnorm to broadcast target (I=-16 LUFS, TP=-1.5 dBTP, LRA=11 LU).
-// Reuses the exact filter string from audioEnhance.ts. This is NOT the two-pass
-// measured loudnorm match (that's W5/postMatchSeam) — just a consistent level for
-// the clone clip fed to Cartesia IVC.
+// Single-pass loudnorm for the CLONE-INPUT clip fed to an IVC clone (Cartesia/EL).
+// This is NOT the two-pass measured loudnorm match (that's W5/postMatchSeam) — just a
+// consistent level for the prepared clone sample.
+//
+// Target = I=-20 LUFS, TP=-3 dBTP (the clone-input band). ElevenLabs' own IVC guidance
+// is a −23..−18 dB RMS window with true peak at −3; loudnorm's I is integrated LUFS
+// (loudness, K-weighted) not raw RMS, but for the speech material we feed it the two
+// track within ~1 dB, so I=-20 lands squarely inside EL's RMS band while TP=-3 matches
+// the true-peak ceiling verbatim. We DROPPED the old broadcast target (I=-16:TP=-1.5:
+// LRA=11): -16 LUFS over-drove the clone input relative to EL's guidance, and LRA=11
+// invited loudnorm to expand the dynamic range of a short, already-consistent clip.
+// The target is exposed as a parameter (default = the clone-input band) so a future
+// caller with a different need doesn't have to fork the ffmpeg plumbing — but the ONLY
+// caller today is cloneCleanClip's prep chain, so the default IS the clone-input value.
 // Writes atomically via mkdtemp → rename.
-export async function loudnormClip(inAbsPath: string, outAbsPath: string): Promise<void> {
+export async function loudnormClip(
+  inAbsPath: string,
+  outAbsPath: string,
+  opts?: { integratedLufs?: number; truePeakDb?: number }
+): Promise<void> {
   if (!existsSync(inAbsPath)) throw new Error(`loudnormClip: input not found: ${inAbsPath}`);
   assertDistinctPaths(inAbsPath, outAbsPath, 'loudnormClip');
+  const integratedLufs = opts?.integratedLufs ?? -20;
+  const truePeakDb = opts?.truePeakDb ?? -3;
   mkdirSync(dirname(outAbsPath), { recursive: true });
   const tempDir = mkdtempSync(join(dirname(outAbsPath), '.norm-'));
   const stage = join(tempDir, 'normed.wav');
   try {
-    run('ffmpeg', ['-y', '-v', 'error', '-i', inAbsPath, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-acodec', 'pcm_s16le', stage]);
+    run('ffmpeg', ['-y', '-v', 'error', '-i', inAbsPath, '-af', `loudnorm=I=${integratedLufs}:TP=${truePeakDb}`, '-acodec', 'pcm_s16le', stage]);
     renameSync(stage, outAbsPath);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
