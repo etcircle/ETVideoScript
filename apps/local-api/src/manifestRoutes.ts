@@ -1,4 +1,4 @@
-import { appendProviderRequestEvent, assertInside, assertSpeechProviderSupported, extractSurroundingTranscriptText, ffprobeDurationSec, latestProviderRequest, loadProject, loadTranscript, ProviderRequestIdSchema, readProviderRequests, readSecrets, summarizeProviderRequestsForWorkspace, synthesizeReplacementSpeech, VoiceReferenceSchema, snapSpanToBoundaries, VoicePatchReferenceRangeSchema, type SnapMode } from '@etvideoscript/core';
+import { appendProviderRequestEvent, assertInside, assertSpeechProviderSupported, extractSurroundingTranscriptText, ffprobeDurationSecOrZero, latestProviderRequest, loadProject, loadTranscript, ProviderRequestIdSchema, readProviderRequests, readSecrets, summarizeProviderRequestsForWorkspace, synthesizeReplacementSpeech, VoiceReferenceSchema, snapSpanToBoundaries, VoicePatchReferenceRangeSchema, type SnapMode } from '@etvideoscript/core';
 import { speechToSpeechElevenlabs } from '@etvideoscript/core/providers/tts/elevenlabs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -274,7 +274,9 @@ export function registerManifestRoutes(ctx: LocalApiRouteContext) {
         // For sourceStart===0 this equals opTarget.start/end — provable no-op vs before.
         const { previousText, nextText } = extractSurroundingTranscriptText(transcriptWords, opTarget?.clipId ?? '', phaseAssetStart, phaseAssetEnd);
         const speech = await synthesizeReplacementSpeech(ws, { text, provider, voice, language, requestId, projectId: req.params.projectId, operationId: operation.id, ...(model ? { model } : {}), ...(previousText ? { previousText } : {}), ...(nextText ? { nextText } : {}) });
-        const generated = ffprobeDurationSec(assertInside(ws, speech.asset));
+        // OrZero: a pure-silence payload silence-trims to a zero-sample WAV whose duration
+        // ffprobe can't read — that's the degraded-payload band below, not a 500.
+        const generated = ffprobeDurationSecOrZero(assertInside(ws, speech.asset));
         const requested = opTarget ? (opTarget.end - opTarget.start) : (req.body.end - req.body.start);
         const durationWarning = voicePatchDurationWarning(generated, requested);
         // TTS sometimes returns HTTP 200 with degraded/empty audio (observed with
@@ -453,7 +455,8 @@ export function registerManifestRoutes(ctx: LocalApiRouteContext) {
         const assetAbs = assertInside(ws, assetRel);
         mkdirSync(dirname(assetAbs), { recursive: true });
         writeFileSync(assetAbs, s2sResult.audio);
-        const generated = ffprobeDurationSec(assetAbs);
+        // OrZero: an unreadable/empty result lands in the tooShort band below (degraded payload, not a 500).
+        const generated = ffprobeDurationSecOrZero(assetAbs);
         // Use the snapped op.target span — operation.target carries the snapped values from Phase 1.
         const s2sOpTarget = (operation as any).target;
         const s2sTargetStart: number = s2sOpTarget?.start ?? start;

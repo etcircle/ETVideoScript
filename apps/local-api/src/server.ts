@@ -41,7 +41,7 @@ import {
   safeProjectPath,
   saveManifestV3,
   saveProject,
-  ffprobeDurationSec,
+  ffprobeDurationSecOrZero,
   STUDIO_CLEANUP_STALE_WARNING,
   ProviderRequestIdSchema,
   readProviderRegistry,
@@ -629,9 +629,16 @@ export function createApp(config: ApiConfig = loadConfig()) {
         const { previousText, nextText } = extractSurroundingTranscriptText(transcriptWords, clipId ?? '', start, end);
         const granularity = params.granularity === 'word' || params.granularity === 'phrase' || params.granularity === 'sentence' ? params.granularity : undefined;
         const speech = await synthesizeReplacementSpeech(ws, { text, provider: params.provider, voice: params.voice, language, requestId, projectId, operationId: operation.id, ...(agentModel ? { model: agentModel } : {}), ...(previousText ? { previousText } : {}), ...(nextText ? { nextText } : {}), ...(granularity ? { granularity } : {}) });
-        const generated = ffprobeDurationSec(assertInside(ws, speech.asset));
+        // OrZero: a pure-silence payload silence-trims to a zero-sample WAV whose
+        // duration ffprobe can't read — degraded payload, not an internal error.
+        const generated = ffprobeDurationSecOrZero(assertInside(ws, speech.asset));
         const requested = end - start;
         const durationWarning = voicePatchDurationWarning(generated, requested);
+        // Same hard 100 ms degraded-payload floor as the HTTP voice-patch routes.
+        // validateLocal would reject the approve below anyway (approved patch with
+        // sub-floor durationGeneratedSec is unrepresentable); failing here first keeps
+        // the rejection reason human-readable instead of a raw validation string.
+        if (generated < 0.1) throw new Error(`TTS returned implausibly short audio (${(generated * 1000).toFixed(0)} ms for a ${(requested * 1000).toFixed(0)} ms slot). The asset was not approved; you can retry.`);
         const updated = updateManifestOperation(ws, operation.id, { status: 'approved', asset: speech.asset, providerRequestId: requestId, durationGeneratedSec: generated, durationRequestedSec: requested, ...(durationWarning ? { durationWarning } : {}), ...(speech.seamBaked ? { seamBaked: true } : {}) });
         return { response: { result: { operation: updated, providerRequestId: requestId, asset: speech.asset }, manifestVersion: version() }, changedOperationIds };
       } catch (err) {

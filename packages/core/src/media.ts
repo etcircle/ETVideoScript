@@ -31,6 +31,19 @@ export function ffprobeDurationSec(filePath: string): number {
   return duration;
 }
 
+/**
+ * Like ffprobeDurationSec, but returns 0 instead of throwing when the duration is
+ * unreadable. For freshly-synthesized TTS assets: a payload that was pure silence
+ * gets silence-trimmed (tts.ts trimSilenceInPlace) down to a zero-sample WAV whose
+ * container ffprobe reports as duration=N/A. That is a DEGRADED PAYLOAD, not an
+ * internal error — callers route the 0 through their existing sub-100 ms floor so
+ * the op is rejected cleanly (same defense as the ~50 ms ElevenLabs near-silence
+ * case) instead of surfacing a raw 500 from the probe.
+ */
+export function ffprobeDurationSecOrZero(filePath: string): number {
+  try { return ffprobeDurationSec(filePath); } catch { return 0; }
+}
+
 export function ffprobe(filePath: string) {
   const stdout = run('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath]);
   const data = JSON.parse(stdout);

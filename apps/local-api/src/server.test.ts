@@ -13,7 +13,11 @@ function config(root: string, overrides = {}) {
   return { host: '127.0.0.1', port: 0, workspaceRoot: root, enableTerminal: false, allowedOrigins: ['http://127.0.0.1:4318'], lanOrigins: [], terminalToken: null, ...overrides };
 }
 
-function wavBuffer(durationSec: number): Buffer {
+// Audible 440 Hz tone (like the mock provider's wavTone, but with an exact duration).
+// Must NOT be silence: the TTS pipeline silence-trims every synthesized asset at -40 dB
+// (tts.ts trimSilenceInPlace), so an all-zero payload trims to a zero-sample WAV and the
+// route correctly rejects it as a degraded payload. Success-path stubs need real signal.
+function wavBuffer(durationSec: number, opts: { silent?: boolean } = {}): Buffer {
   const sampleRate = 24000;
   const samples = Math.ceil(sampleRate * durationSec);
   const dataBytes = samples * 2;
@@ -31,11 +35,18 @@ function wavBuffer(durationSec: number): Buffer {
   buffer.writeUInt16LE(16, 34);
   buffer.write('data', 36);
   buffer.writeUInt32LE(dataBytes, 40);
+  if (!opts.silent) {
+    for (let i = 0; i < samples; i += 1) {
+      const fade = Math.min(i / 800, (samples - i) / 800, 1);
+      const sample = Math.round(Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 2400 * Math.max(fade, 0));
+      buffer.writeInt16LE(sample, 44 + i * 2);
+    }
+  }
   return buffer;
 }
 
-function stubXai(root: string, durationSec = 1) {
-  const audio = wavBuffer(durationSec);
+function stubXai(root: string, durationSec = 1, opts: { silent?: boolean } = {}) {
+  const audio = wavBuffer(durationSec, opts);
   const fetchMock = vi.fn(async () => ({ ok: true, arrayBuffer: async () => audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength) }));
   vi.stubGlobal('fetch', fetchMock);
   vi.stubEnv('HOME', root);
@@ -228,9 +239,11 @@ describe('local API', () => {
       expect(existsSync(join(projectRoot, 'captions/draft.srt'))).toBe(false);
       const body = readFileSync(join(projectRoot, 'captions/edited.srt'), 'utf8');
       expect(body).toContain('fixed phrase');
-      // Voice-patch duration now participates in global ripple/shrink, so captions use the generated
-      // mock-audio duration instead of stretching replacement text across the old source window.
-      expect(body).toContain('00:00:02,000 --> 00:00:02,660\nfixed phrase');
+      // Phase-1 voice_patch semantics (822f94d, AGENTS.md): shorter generated audio must NOT
+      // shrink the timeline — the slot duration is preserved and slack renders as silence.
+      // Captions are a projection of the timeline, so the cue spans the full 2s slot, not the
+      // 0.66s mock-audio duration the pre-phase-1 ripple/shrink era asserted here.
+      expect(body).toContain('00:00:02,000 --> 00:00:04,000\nfixed phrase');
       expect(body).toContain('quiet');
       expect(body).not.toContain('delete');
       expect(body).not.toContain('this');
@@ -271,10 +284,18 @@ describe('local API', () => {
       expect(createdOperation.status).toBe('approved');
       const opId = createdOperation.id;
 
-      const patched = await app.inject({ method: 'PATCH', url: `/api/projects/episode-001/manifest/operations/${opId}`, payload: { reason: 'delete selected words', start: 1.1, end: 2.1, draftText: 'draft words' } });
+      const patched = await app.inject({ method: 'PATCH', url: `/api/projects/episode-001/manifest/operations/${opId}`, payload: { reason: 'delete selected words', start: 1.1, end: 2.1 } });
       expect(patched.statusCode).toBe(200);
       expect(JSON.parse(patched.body).operation.reason).toBe('delete selected words');
-      expect(JSON.parse(patched.body).operation.draftText).toBe('draft words');
+
+      // draftText is a MUTE-only field (703e61d type-over draft flow: typing over a selection
+      // creates a mute op carrying the draft). The v3 op registry parses each patch through
+      // the op kind's schema, so draftText on a cut is stripped — round-trip it on a mute.
+      const mute = await app.inject({ method: 'POST', url: '/api/projects/episode-001/manifest/operations', payload: { type: 'mute', start: 3, end: 4, reason: 'type-over draft' } });
+      const muteId = JSON.parse(mute.body).operation.id;
+      const muted = await app.inject({ method: 'PATCH', url: `/api/projects/episode-001/manifest/operations/${muteId}`, payload: { draftText: 'draft words' } });
+      expect(muted.statusCode).toBe(200);
+      expect(JSON.parse(muted.body).operation.draftText).toBe('draft words');
 
       const removed = await app.inject({ method: 'DELETE', url: `/api/projects/episode-001/manifest/operations/${opId}` });
       expect(removed.statusCode).toBe(200);
@@ -465,6 +486,27 @@ describe('local API', () => {
       expect(body.operation.asset).toMatch(/^assets\/voice\/patch-/);
       const lines = readFileSync(join(root, 'episode-001/logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
       expect(lines.filter((line) => line.requestId === 'req-xai-direct-1').map((line) => line.status)).toEqual(['approved', 'started', 'succeeded']);
+    } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('rejects a pure-silence TTS payload as degraded instead of 500ing on the unreadable trimmed asset', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-api-'));
+    const app = createApp(config(root));
+    stubXai(root, 1, { silent: true });
+    try {
+      await createTranscriptProject(app, root);
+      // A 1s all-silence payload passes the provider's HTTP layer but silence-trims to a
+      // zero-sample WAV (duration unreadable). That must land in the same degraded-payload
+      // rejection as the ~50 ms ElevenLabs near-silence case — op rejected, 502, no 500.
+      const response = await app.inject({ method: 'POST', url: '/api/projects/episode-001/manifest/voice-patches', payload: { requestId: 'req-xai-silent-1', start: 1, end: 2, text: 'paid words', provider: 'xai', voice: 'eve' } });
+      expect(response.statusCode).toBe(502);
+      const body = JSON.parse(response.body);
+      expect(body.error).toContain('implausibly short audio');
+      const workspace = join(root, 'episode-001');
+      const op = loadManifestV3(workspace).operations.find((candidate: any) => candidate.providerRequestId === 'req-xai-silent-1') as any;
+      expect(op?.status).toBe('rejected');
+      const lines = readFileSync(join(root, 'episode-001/logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(lines.filter((line) => line.requestId === 'req-xai-silent-1').map((line) => line.status)).toEqual(['approved', 'started', 'succeeded', 'op_update_failed']);
     } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
