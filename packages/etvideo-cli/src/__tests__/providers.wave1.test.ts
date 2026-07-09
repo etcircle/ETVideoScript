@@ -20,6 +20,9 @@ function run(args: string[], env: Record<string, string | undefined> = {}, input
 // budget and timed out under full-suite parallel load. Split into sequential steps
 // sharing one ETVS_HOME (vitest runs its within a describe in order), each with an
 // explicit timeout that prices in the per-spawn compile cost.
+// NOTE: the steps are deliberately ORDER-COUPLED (later its read providers the
+// earlier ones registered into the shared ETVS_HOME) — run the whole file; a -t
+// filter on a later step alone fails on the missing shared state.
 const SPAWN_TEST_TIMEOUT = 60_000;
 
 describe('ets providers CLI', () => {
