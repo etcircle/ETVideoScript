@@ -105,22 +105,23 @@ describeIfFfmpeg('cloneCleanClip — provider-dispatched clone', () => {
     expect(calls.some((u) => u.includes('/voices/clone'))).toBe(false);
   }, 60_000);
 
-  it('defaults to elevenlabs when no provider is given (matches the route default)', async () => {
-    (globalThis as any).fetch = vi.fn(async () =>
-      new Response(JSON.stringify({ voice_id: 'el_default_xyz' }), {
-        status: 200, headers: { 'content-type': 'application/json' }
-      })
-    );
-    const result = await cloneCleanClip(workspace, {
+  it('rejects an unknown provider at runtime — core has NO default provider', async () => {
+    // `provider` is required at the type level, but params commonly arrive from parsed JSON
+    // bodies; an unrecognized string must fail fast, not dispatch to undefined.clone.
+    // (Defaulting is ROUTE policy — settingsRoutes' `fields.provider ?? 'elevenlabs'` —
+    // deliberately NOT replicated in core; see the CLONE_PROVIDERS note in voiceClone.ts.)
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
       ...settingsInput,
-      projectId: 'proj-default',
+      projectId: 'proj-bad',
       scope: 'project',
-      // provider omitted on purpose
+      provider: 'not-a-provider' as any,
       referenceRange: REFERENCE_RANGE,
-      secret: 'el-key',
+      secret: 'key',
       signal: new AbortController().signal
-    });
-    expect(result.voice.provider).toBe('elevenlabs');
+    })).rejects.toThrow(/unsupported clone provider/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   }, 60_000);
 
   it('dispatches to the Cartesia adapter and records provider=cartesia (unchanged path)', async () => {
@@ -190,7 +191,10 @@ describeIfFfmpeg('cloneCleanClip — provider-dispatched clone', () => {
 
   it('legacy cartesia cache records still hit (backward-compatible)', async () => {
     // A record written by the old Cartesia-hardwired path carries provider: 'cartesia' and no
-    // provider-specific extras. It must still be reused for a Cartesia request.
+    // accountRef. It must still be reused for a Cartesia request. Note `provider` is now
+    // REQUIRED — a caller reaching its legacy Cartesia cache does so by explicitly passing
+    // 'cartesia', which is the point of the required-provider change: no core default can
+    // silently route it to a different provider and skip these records.
     const range = { clipId: 'clip_001', start: 2, end: 7 };
     upsertVoice({
       ...settingsInput,
@@ -209,5 +213,67 @@ describeIfFfmpeg('cloneCleanClip — provider-dispatched clone', () => {
     expect(hit.voice.voiceId).toBe('legacy_cart_voice');
     // Sanity: the library actually contains the seeded record.
     expect(readVoicesLibrary(settingsInput).value.voices.some((v) => v.id === 'voice-legacy')).toBe(true);
+  }, 60_000);
+
+  it('same provider + DIFFERENT accountRef → cache miss (fresh clone under the new account)', async () => {
+    const range = { clipId: 'clip_001', start: 3, end: 8 };
+    // Record created under account A.
+    upsertVoice({
+      ...settingsInput,
+      voice: {
+        id: 'voice-acct-a', name: 'acct-a', provider: 'elevenlabs', voiceId: 'el_acct_a_voice',
+        accountRef: 'elevenlabs:acct-a', originProjectId: 'proj-acct', cloneScope: 'project',
+        sourceAudioRange: range, provenance: { method: 'ivc', createdBy: 'clone-route' }
+      }
+    });
+    // Request under account B: the A-record's voiceId does not exist in B, so the cache MUST
+    // miss and a fresh clone call must fire.
+    const calls: string[] = [];
+    (globalThis as any).fetch = vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ voice_id: 'el_acct_b_voice' }), {
+        status: 200, headers: { 'content-type': 'application/json' }
+      });
+    });
+    const result = await cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-acct', scope: 'project', provider: 'elevenlabs',
+      accountRef: 'elevenlabs:acct-b',
+      referenceRange: range, secret: 'el-key-b', signal: new AbortController().signal
+    });
+    expect(result.cached).toBe(false);
+    expect(result.voice.voiceId).toBe('el_acct_b_voice');
+    expect(result.voice.accountRef).toBe('elevenlabs:acct-b');
+    expect(calls.length).toBeGreaterThan(0);
+
+    // And the MATCHING accountRef now cache-hits its own record.
+    (globalThis as any).fetch = vi.fn(async () => { throw new Error('matching accountRef should cache-hit'); });
+    const hitA = await cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-acct', scope: 'project', provider: 'elevenlabs',
+      accountRef: 'elevenlabs:acct-a',
+      referenceRange: range, secret: 'el-key-a', signal: new AbortController().signal
+    });
+    expect(hitA.cached).toBe(true);
+    expect(hitA.voice.voiceId).toBe('el_acct_a_voice');
+  }, 60_000);
+
+  it('legacy record WITHOUT accountRef still hits an account-tagged request (no orphaning)', async () => {
+    const range = { clipId: 'clip_001', start: 4, end: 9 };
+    // Legacy/unscoped record: no accountRef field at all.
+    upsertVoice({
+      ...settingsInput,
+      voice: {
+        id: 'voice-unscoped', name: 'unscoped', provider: 'cartesia', voiceId: 'cart_unscoped_voice',
+        originProjectId: 'proj-unscoped', cloneScope: 'project', sourceAudioRange: range,
+        provenance: { method: 'ivc', createdBy: 'clone-route' }
+      }
+    });
+    (globalThis as any).fetch = vi.fn(async () => { throw new Error('legacy unscoped record must match any account'); });
+    const hit = await cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-unscoped', scope: 'project', provider: 'cartesia',
+      accountRef: 'cartesia:some-new-account',
+      referenceRange: range, secret: 'cart-key', signal: new AbortController().signal
+    });
+    expect(hit.cached).toBe(true);
+    expect(hit.voice.voiceId).toBe('cart_unscoped_voice');
   }, 60_000);
 });

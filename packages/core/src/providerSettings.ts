@@ -137,6 +137,12 @@ export const VoiceRecordSchema = z.object({
   originProjectId: z.string().min(1).max(200).optional(),
   // W4 additions — all optional, keeps back-compat (existing voices.json parses unchanged).
   cloneScope: z.enum(['local', 'project']).optional(),
+  // Stable NON-SECRET identifier of the provider account/credential that created this clone
+  // (secrets-store key name and/or endpoint host — NEVER a secret value; this file is
+  // chmod 600 but still must not hold key material). Cache reuse in cloneCleanClip requires
+  // it to match when present; records without it are legacy/account-unscoped and match any
+  // request for their provider. Optional ⇒ existing voices.json parses unchanged.
+  accountRef: z.string().min(1).max(200).optional(),
   sourceAudioRange: z.object({
     clipId: z.string().min(1).max(128),
     start: z.number().nonnegative(),
