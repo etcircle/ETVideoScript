@@ -62,6 +62,7 @@ import {
 } from '@etvideoscript/core';
 import {
   ClientMessageSchema,
+  ToolErrorSchema,
   ToolParamsSchemaByName,
   type ToolCallMessage,
   type ToolError,
@@ -262,6 +263,14 @@ function writeAgentIdempotency(ws: string, records: Record<string, AgentIdempote
 }
 function toolError(code: ToolError['code'], message: string, status = 400, manifestVersion?: string, details?: unknown): ToolError {
   return { code, message, status, ...(manifestVersion ? { manifestVersion } : {}), ...(details ? { details } : {}) };
+}
+// Strict ToolError identification for thrown values. `'code' in err` is NOT enough:
+// Node fs errors (ENOENT, EACCES, ...) also carry a string .code, and misreading one
+// as a protocol error would skip op rollback and leak a raw error into the envelope.
+// Schema validation (enum-constrained code) rejects those, and — unlike an instanceof
+// class brand — still recognizes sticky idempotency errors after their JSON round-trip.
+function isToolError(err: unknown): err is ToolError {
+  return ToolErrorSchema.safeParse(err).success;
 }
 function originAllowed(origin: string | string[] | undefined, allowedOrigins: string[]): boolean {
   const value = Array.isArray(origin) ? origin[0] : origin;
@@ -595,8 +604,8 @@ export function createApp(config: ApiConfig = loadConfig()) {
         // with the same requestId replays the error instead of re-executing the provider.
         // Only paid_provider_failed is persisted — pre-execution validation errors (invalid
         // params, stale manifest) throw before this try and stay retryable by design.
-        if (typeof err === 'object' && err && (err as ToolError).code === 'paid_provider_failed') {
-          records[params.requestId] = { tool, bodyHash, error: err as ToolError };
+        if (isToolError(err) && err.code === 'paid_provider_failed') {
+          records[params.requestId] = { tool, bodyHash, error: err };
           writeAgentIdempotency(ws, records);
         }
         throw err;
@@ -671,11 +680,24 @@ export function createApp(config: ApiConfig = loadConfig()) {
       } catch (err) {
         // The degraded-payload floor above throws a fully-formed ToolError after recording
         // its own rejection + audit row — pass it through untouched (re-wrapping would both
-        // stringify it as "[object Object]" and double-write the op rejection).
-        if (typeof err === 'object' && err && 'code' in err) throw err;
-        updateManifestOperation(ws, operation.id, { status: 'rejected', reason: err instanceof Error ? err.message : String(err) });
+        // stringify it as "[object Object]" and double-write the op rejection). STRICT
+        // identification only: Node fs errors also carry .code and must fall through to
+        // the rollback below, not masquerade as protocol errors.
+        if (isToolError(err)) throw err;
+        const reason = err instanceof Error ? err.message : String(err);
+        // Best-effort rollback (mirrors manifestRoutes' approve-failure path): if the very
+        // failure was a workspace write error this update can fail too — the wrapped
+        // ToolError below is still thrown and, being paid_provider_failed, still sticky.
+        try { updateManifestOperation(ws, operation.id, { status: 'rejected', reason }); }
+        catch { /* ignore — the ledger event below is still the truth */ }
         const request = latestProviderRequest(ws, requestId);
-        throw toolError('paid_provider_failed', request?.error || (err instanceof Error ? err.message : String(err)), 500, version());
+        // A failure AFTER the provider row went 'succeeded' means money was spent on audio
+        // we could not attach (e.g. a filesystem error during probe/approve). Leave the same
+        // op_update_failed audit row the HTTP route writes on its approve-failure path.
+        if (request?.status === 'succeeded') {
+          appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: params.provider, voice: params.voice, language, text, operationId: operation.id, status: 'op_update_failed', completedAt: new Date().toISOString(), error: reason, start, end, ...providerExecutionShape(request) }));
+        }
+        throw toolError('paid_provider_failed', request?.error || reason, 500, version());
       }
     }
     if (tool === 'approve_operation') {
@@ -793,7 +815,9 @@ export function createApp(config: ApiConfig = loadConfig()) {
         sendJson(peer, { kind: 'tool_result', id: parsed.id, protocolVersion: parsed.protocolVersion, callId: parsed.id, ok: true, result: response });
         if (manifestChanged) fanoutManifestChanged(projectId, changedOperationIds);
       } catch (err) {
-        const error = typeof err === 'object' && err && 'code' in err ? err as ToolError : toolError('internal_error', err instanceof Error ? err.message : String(err), 500, manifestContentVersion(ws));
+        // Strict guard (isToolError): a Node fs error's .code must not be emitted as a
+        // protocol error — wrap anything that isn't a schema-valid ToolError.
+        const error = isToolError(err) ? err : toolError('internal_error', err instanceof Error ? err.message : String(err), 500, manifestContentVersion(ws));
         sendJson(peer, { kind: 'tool_error', id: parsed.id, protocolVersion: parsed.protocolVersion, callId: parsed.id, ok: false, error });
       }
     });
