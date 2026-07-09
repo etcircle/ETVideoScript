@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertInside, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, readSecrets, sourceChannelFixFingerprint, type ManifestV3 } from '@etvideoscript/core';
+import { assertInside, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, readChannelFixSidecar, readSecrets, sourceChannelFixFingerprint, type ManifestV3 } from '@etvideoscript/core';
 import type { LocalApiRouteContext } from './routeContext';
 
 /**
@@ -113,6 +113,7 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
         // extractClipAudio are self-freshening (channelFixSidecarFresh) and cheap/local/
         // non-paid, so this is always safe to run before every studio-cleanup call.
         const clipAudioMatch = /^media\/([^/]+)\/extracted-audio\.wav$/.exec(primaryAudio);
+        let refreshSucceeded = true;
         try {
           if (primaryAudio === 'media/extracted-audio.wav') {
             await extractAudio(ws, { overwrite: false, logJob: false });
@@ -122,7 +123,10 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
         } catch {
           // Refresh is best-effort: primaryAudioRel already confirmed audio bytes exist
           // on disk, so a missing input/source.mp4 or a clip removed since extraction
-          // just means cleanup proceeds against the bytes already there.
+          // just means cleanup proceeds against the bytes already there. But the bytes
+          // may then still reflect an OLD fix state — refreshSucceeded gates which
+          // fingerprint gets stamped on the cleanup record below.
+          refreshSucceeded = false;
         }
 
         // Duration/cost must be probed AFTER the refresh above — the refresh can rewrite
@@ -150,7 +154,17 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
         // disabling a forced fix that had no effect on duplicated-channel audio) still
         // restamps the changed fingerprint via the cache-hit branch, instead of an
         // unconditional cacheKey match returning the stale fingerprint forever.
-        const audioChannelFixFingerprint = sourceChannelFixFingerprint(current);
+        //
+        // Stamp what's actually IN the bytes, not what the manifest wishes were there:
+        // when the refresh above failed, sourceAudioAbs may still carry an OLD fix state,
+        // so stamping the manifest's current fingerprint would let buildRenderPlan trust
+        // a cleanup produced from the wrong mix. The extraction sidecar records the mix
+        // truly baked into the bytes; if even that is missing, omit the field entirely —
+        // an absent fingerprint counts as stale whenever an audioChannelFix record exists
+        // (buildRenderPlan's rule), which is exactly the conservative fallback we want.
+        const audioChannelFixFingerprint: string | undefined = refreshSucceeded
+          ? sourceChannelFixFingerprint(current)
+          : readChannelFixSidecar(sourceAudioAbs);
 
         // Idempotency: if the manifest already has an approved/pending cleanup with this
         // cache key AND fingerprint, return immediately without re-running the isolator.
@@ -160,7 +174,7 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
 
         // Cache hit: asset already on disk from a prior run.
         if (existsSync(assetAbs)) {
-          const cleanup = { status: 'approved' as const, assetPath: assetRel, cacheKey, provider: 'studio-sound.elevenlabs-isolation', createdAt: new Date().toISOString(), costUsd, audioChannelFixFingerprint };
+          const cleanup = { status: 'approved' as const, assetPath: assetRel, cacheKey, provider: 'studio-sound.elevenlabs-isolation', createdAt: new Date().toISOString(), costUsd, ...(audioChannelFixFingerprint !== undefined ? { audioChannelFixFingerprint } : {}) };
           const next = { ...current, studioCleanup: cleanup };
           saveManifest(ws, next);
           return { studioCleanup: cleanup, manifest: loadManifest(ws), validation: validateWorkspaceManifest(ws), costDisclosure, cached: true };
@@ -255,7 +269,7 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
           ...(providerId ? { providerId } : {}),
           createdAt: new Date().toISOString(),
           costUsd: testMode ? 0 : costUsd,
-          audioChannelFixFingerprint
+          ...(audioChannelFixFingerprint !== undefined ? { audioChannelFixFingerprint } : {})
         };
         const next = { ...current, studioCleanup: cleanup };
         saveManifest(ws, next);

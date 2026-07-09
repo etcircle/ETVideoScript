@@ -162,5 +162,9 @@ describe('extractAudioAssetInWorkspace keeps the manifest asset in sync with a r
     // describe that, not the stale 1s duration captured at the original detach.
     expect(second.asset.durationSec).toBeCloseTo(2, 1);
     expect(second.manifest.assets.find((a) => a.assetId === second.asset.assetId)?.durationSec).toBeCloseTo(2, 1);
+    // The correction must be PERSISTED, not just returned — no caller saves the manifest
+    // on the refresh path, so detachAudioInWorkspace itself is responsible for the write.
+    const reloaded = loadManifestV3(workspace);
+    expect(reloaded.assets.find((a) => a.assetId === second.asset.assetId)?.durationSec).toBeCloseTo(2, 1);
   }, 60_000);
 });
