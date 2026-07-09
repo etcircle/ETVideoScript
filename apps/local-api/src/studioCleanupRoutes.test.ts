@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createWorkspace, loadManifestV3, saveManifestV3, writeChannelFixSidecar } from '@etvideoscript/core';
+import { buildRenderPlanV3, createWorkspace, loadManifestV3, saveManifestV3, writeChannelFixSidecar } from '@etvideoscript/core';
 import { createApp } from './server';
 
 function config(root: string) {
@@ -82,6 +82,41 @@ describe('studio-cleanup route', () => {
       expect(body.studioCleanup.status).toBe('approved');
       // Confirms the cache-hash was computed from the pre-existing bytes, not a refreshed file.
       expect(statSync(legacyAudio).size).toBe(200);
+    } finally {
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('stamps the fingerprint of the bytes actually cleaned (sidecar), not the manifest fix state, when the pre-clean refresh fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-api-studiocleanup-stalefp-'));
+    const app = createApp(config(root));
+    try {
+      const workspace = join(root, 'episode-001');
+      await createWorkspace({ workspacePath: workspace, projectId: 'episode-001', title: 'Episode 001' });
+
+      // Legacy extracted audio produced BEFORE any channel fix (sidecar: 'none'), and
+      // input/source.mp4 missing so the route's best-effort refresh throws — the paid
+      // cleanup then runs on the stale 'none' bytes even though the manifest now says
+      // a 'left' fix is approved.
+      mkdirSync(join(workspace, 'media'), { recursive: true });
+      const legacyAudio = join(workspace, 'media/extracted-audio.wav');
+      writeFileSync(legacyAudio, wavSilence(200));
+      writeChannelFixSidecar(legacyAudio, undefined); // 'none' — the mix truly baked into the bytes
+
+      const manifest = loadManifestV3(workspace);
+      manifest.audioChannelFix = { status: 'approved', sourceChannel: 'left', detection: { leftRmsDb: -20, rightRmsDb: -80, auto: true }, appliedAt: new Date().toISOString() };
+      saveManifestV3(workspace, manifest, { revision: false });
+
+      const res = await app.inject({ method: 'POST', url: '/api/projects/episode-001/manifest/studio-cleanup', payload: {} });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.studioCleanup.status).toBe('approved');
+      // The record must describe the bytes ('none'), NOT the manifest's current fix ('left') —
+      // otherwise buildRenderPlan would trust a cleanup produced from the wrong channel mix.
+      expect(body.studioCleanup.audioChannelFixFingerprint).toBe('none');
+      const plan = buildRenderPlanV3(loadManifestV3(workspace));
+      expect(plan.studioCleanupStale).toBe(true);
     } finally {
       await app.close();
       rmSync(root, { recursive: true, force: true });

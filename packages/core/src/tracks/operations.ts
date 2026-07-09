@@ -217,8 +217,11 @@ export function extractAudioAssetInWorkspace(workspacePath: string, manifest: Ma
  * freshness check (above) re-extracts assets/audio/<assetId>.wav in place if it's
  * stale relative to the current audioChannelFix state, and this function then just
  * resolves the existing companion audio clip/track instead of throwing (issue #4).
- * No manifest write is needed on that path — only file bytes on disk changed, the
- * clip/track/asset records are untouched (detachAudio never runs twice).
+ * Usually no manifest write is needed on that path — only file bytes on disk changed,
+ * the clip/track/asset records are untouched (detachAudio never runs twice). The one
+ * exception: extractAudioAssetInWorkspace may patch the detached asset's durationSec
+ * (source replace) — that returns a NEW manifest object, which must be persisted or
+ * the correction is silently lost (no caller saves on the refresh path).
  */
 export function detachAudioInWorkspace(workspacePath: string, input: { clipId: string; detachedClipId?: string; refresh?: boolean }): { manifest: ManifestV3; videoClip: Clip; audioClip: Clip; audioTrack: Track; asset: Asset } {
   const manifest = loadManifestV3(workspacePath);
@@ -229,6 +232,10 @@ export function detachAudioInWorkspace(workspacePath: string, input: { clipId: s
     const audioClip = extracted.manifest.tracks.flatMap((track) => track.clips).find((candidate) => candidate.detachedFrom === clip.clipId);
     const audioTrack = extracted.manifest.tracks.find((track) => track.clips.some((candidate) => candidate.clipId === audioClip?.clipId));
     if (!audioClip || !audioTrack) throw new Error(`Clip ${input.clipId} is marked detached but its companion audio clip is missing`);
+    // Persist iff extraction actually changed the manifest (durationSec patch after a
+    // source replace) — updateAsset/addAsset always return a new object, the no-change
+    // paths return `manifest` itself, so referential inequality is the exact signal.
+    if (extracted.manifest !== manifest) saveManifestV3(workspacePath, extracted.manifest, { revision: true });
     return { manifest: extracted.manifest, videoClip: clip, audioClip, audioTrack, asset: extracted.asset };
   }
   const detached = detachAudio(extracted.manifest, { clipId: input.clipId, assetId: extracted.asset.assetId, detachedClipId: input.detachedClipId });
