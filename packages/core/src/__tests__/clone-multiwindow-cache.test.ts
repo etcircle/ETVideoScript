@@ -46,6 +46,13 @@ const WINDOWS = [
   { clipId: 'clip_001', start: 15, end: 25 }
 ];
 
+// Canonical sha256-hex cache keys — the cleaned contract enforces ^[0-9a-f]{64}$ before any
+// path construction (traversal defense), so fixtures must use canonical keys too.
+const KEY_A = 'a'.repeat(64);
+const KEY_B = 'b'.repeat(64);
+const KEY_K = 'c'.repeat(64);
+const KEY_GHOST = 'd'.repeat(64);
+
 describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => {
   let workspace: string;
   let settingsInput: SettingsPathsInput;
@@ -65,7 +72,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     // Stand-in "cleaned" WAVs (length-preserving) at the CONTENT-ADDRESSED paths core now
     // enforces (assets/studio-clean/<cacheKey>.wav) — one per cacheKey the tests use.
     mkdirSync(join(workspace, 'assets', 'studio-clean'), { recursive: true });
-    for (const key of ['cacheKeyA', 'cacheKeyB', 'k']) {
+    for (const key of [KEY_A, KEY_B, KEY_K]) {
       spawnSync('ffmpeg', [
         '-f', 'lavfi', '-i', `sine=frequency=150:sample_rate=48000:duration=${SOURCE_DURATION}`,
         '-ac', '1', '-ar', '48000', '-acodec', 'pcm_s16le', '-y', join(workspace, 'assets', 'studio-clean', `${key}.wav`)
@@ -215,14 +222,14 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
       multiWindow: { windows: WINDOWS, sourceClass: 'cleaned' as const, cleanupIdentity: cacheKey, manifest: cleanedManifest(cacheKey) },
       secret: 'el-key', signal: new AbortController().signal
     });
-    const first = await cloneCleanClip(workspace, cleanedReq('cacheKeyA'));
+    const first = await cloneCleanClip(workspace, cleanedReq(KEY_A));
     expect(first.cached).toBe(false);
     expect(first.voice.sourceClass).toBe('cleaned');
-    expect(first.voice.cleanupIdentity).toBe('cacheKeyA');
+    expect(first.voice.cleanupIdentity).toBe(KEY_A);
 
     // Same cleanupIdentity → cache hit.
     (globalThis as any).fetch = vi.fn(async () => { throw new Error('same cleanupIdentity should cache-hit'); });
-    const hit = await cloneCleanClip(workspace, cleanedReq('cacheKeyA'));
+    const hit = await cloneCleanClip(workspace, cleanedReq(KEY_A));
     expect(hit.cached).toBe(true);
     expect(hit.voice.voiceId).toBe('el_cleaned_a');
 
@@ -230,7 +237,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     (globalThis as any).fetch = vi.fn(async () =>
       new Response(JSON.stringify({ voice_id: 'el_cleaned_b' }), { status: 200, headers: { 'content-type': 'application/json' } })
     );
-    const miss = await cloneCleanClip(workspace, cleanedReq('cacheKeyB'));
+    const miss = await cloneCleanClip(workspace, cleanedReq(KEY_B));
     expect(miss.cached).toBe(false);
     expect(miss.voice.voiceId).toBe('el_cleaned_b');
   }, 90_000);
@@ -243,7 +250,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     );
     const result = await cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-mw', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'k', manifest: cleanedManifest('k') },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_K, manifest: cleanedManifest(KEY_K) },
       secret: 'el-key', signal: new AbortController().signal
     });
     expect(result.cached).toBe(false);
@@ -277,9 +284,9 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     (globalThis as any).fetch = fetchSpy;
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-bad', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', manifest: cleanedManifest('cacheKeyA') },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', manifest: cleanedManifest(KEY_A) },
       secret: 'el-key', signal: new AbortController().signal
-    })).rejects.toThrow(/cleanupIdentity is required/);
+    })).rejects.toThrow(CleanedSourceUnavailableError); // typed, not a plain Error — callers branch on .code
     expect(fetchSpy).not.toHaveBeenCalled();
   }, 90_000);
 
@@ -312,14 +319,14 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     // cleanup must NOT even serve that cache hit — validation precedes the cache read.
     const fetchSpy = vi.fn();
     (globalThis as any).fetch = fetchSpy;
-    const staleManifest = cleanedManifest('cacheKeyA', {
+    const staleManifest = cleanedManifest(KEY_A, {
       // A channel fix exists but the cleanup carries no matching fingerprint → stale by the
       // same rule render uses.
       audioChannelFix: { status: 'approved', sourceChannel: 'left', detection: { leftRmsDb: -12, rightRmsDb: -60, auto: true }, appliedAt: '2026-07-10T00:00:00.000Z' }
     });
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA', manifest: staleManifest },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_A, manifest: staleManifest },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(CleanedSourceUnavailableError);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -330,7 +337,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     (globalThis as any).fetch = fetchSpy;
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA', manifest: cleanedManifest('cacheKeyA', { status: 'disabled' }) },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_A, manifest: cleanedManifest(KEY_A, { status: 'disabled' }) },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/status "disabled"/);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -343,7 +350,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
       // Manifest says cacheKeyA; the request claims cacheKeyB → windows were selected against
       // a different cleanup generation.
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyB', manifest: cleanedManifest('cacheKeyA') },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_B, manifest: cleanedManifest(KEY_A) },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/does not match the manifest's studioCleanup.cacheKey/);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -352,10 +359,11 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
   it('missing cleaned artifact → typed error before cache/remote', async () => {
     const fetchSpy = vi.fn();
     (globalThis as any).fetch = fetchSpy;
-    // 'ghostKey' has an approved manifest record but no WAV on disk.
+    // KEY_GHOST has an approved manifest record but no WAV on disk (canonical form so the
+    // format gate passes and the existence check is what fires).
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'ghostKey', manifest: cleanedManifest('ghostKey') },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_GHOST, manifest: cleanedManifest(KEY_GHOST) },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/cleaned artifact missing/);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -367,12 +375,44 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
       multiWindow: {
-        windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA',
+        windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_A,
         // Hand-edited assetPath pointing at a DIFFERENT (existing) file must not be trusted.
-        manifest: cleanedManifest('cacheKeyA', { assetPath: 'assets/studio-clean/cacheKeyB.wav' })
+        manifest: cleanedManifest(KEY_A, { assetPath: `assets/studio-clean/${KEY_B}.wav` })
       },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/not the expected content-addressed path/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('TRAVERSAL cacheKey (../../…) → typed error, NO cache hit, NO remote call (Hermes repro)', async () => {
+    // Hermes round-2 P1 payload: a non-canonical cacheKey that stays inside the workspace.
+    // Both sides of the assetPath equality interpolate the same string, and assertInside
+    // passes (media/... is inside the workspace) — only the sha256-hex format gate stops it.
+    const evilKey = '../../media/clip_001/evil';
+    mkdirSync(join(workspace, 'media', 'clip_001'), { recursive: true });
+    spawnSync('ffmpeg', [
+      '-f', 'lavfi', '-i', 'sine=frequency=999:sample_rate=48000:duration=2',
+      '-ac', '1', '-ar', '48000', '-acodec', 'pcm_s16le', '-y', join(workspace, 'media', 'clip_001', 'evil.wav')
+    ], { stdio: 'ignore' });
+    // Seed a matching cached record keyed to the traversal identity — the original repro
+    // returned this as a laundered cache hit, so the gate must fire BEFORE the cache read.
+    upsertVoice({
+      ...settingsInput,
+      voice: {
+        id: 'voice-evil', name: 'evil', provider: 'elevenlabs', voiceId: 'remote-probe',
+        originProjectId: 'proj-evil', cloneScope: 'project',
+        sourceAudioRange: { clipId: 'clip_001', start: 1, end: 25 },
+        sourceClass: 'cleaned', cleanupIdentity: evilKey, windows: WINDOWS,
+        provenance: { method: 'ivc', createdBy: 'clone-route' }
+      }
+    });
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-evil', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: evilKey, manifest: cleanedManifest(evilKey) },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/not a canonical sha256 hex key/);
     expect(fetchSpy).not.toHaveBeenCalled();
   }, 90_000);
 
@@ -380,11 +420,11 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     const fetchSpy = vi.fn();
     (globalThis as any).fetch = fetchSpy;
     // Manifest whose clip_001 belongs to an asset that is NOT input/source.mp4.
-    const manifest = cleanedManifest('cacheKeyA');
+    const manifest = cleanedManifest(KEY_A);
     manifest.assets = [{ ...manifest.assets[0]!, path: 'input/other-import.mp4' }];
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA', manifest },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: KEY_A, manifest },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/studioCleanup describes only input\/source.mp4/);
     expect(fetchSpy).not.toHaveBeenCalled();

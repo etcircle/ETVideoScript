@@ -433,6 +433,11 @@ export class InsufficientCleanWindowsError extends Error {
   }
 }
 
+// studioCleanup.cacheKey is produced exclusively as a sha256 hex digest of the source audio
+// (studioCleanupRoutes.computeSourceHash). Anything else is hand-edited/corrupt and must never
+// reach path construction.
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
 // Typed error for every violation of the cleaned-source contract in cloneCleanClip's
 // multi-window mode (stale/absent/misdescribed cleanup, cacheKey mismatch, wrong clip).
 // Distinct from InsufficientCleanWindowsError: that one means "the audio doesn't have enough
@@ -670,6 +675,18 @@ export function selectCleanWindows(params: SelectCleanWindowsParams): SelectClea
     chosen.push(w);
     total += w.spanSec;
     if (total >= maxTotalSec) break;
+  }
+
+  // Post-pack floor guard: greedy packing under an adversarial cap/window tuning can select
+  // less than the aggregate floor even though the pre-pack usable set met it (e.g. two 19.9s
+  // windows, floor 30, cap 30 — no subset satisfies both, and a rank-order unlucky greedy can
+  // also under-pack when one does). The invariant is "returned set >= floor, or typed error";
+  // with the locked defaults (~10s windows, floor 30, cap 90) this never fires.
+  if (total < minUsableAggregateSec) {
+    throw new InsufficientCleanWindowsError(
+      total, minUsableAggregateSec,
+      `greedy cap packing chose ${chosen.length} window(s) under the ${maxTotalSec}s cap from ${usableWindows.length} usable — no floor-satisfying subset was packed`
+    );
   }
 
   // Canonical OUTPUT ordering: ascending start (ranking governed selection, not order).
@@ -1048,13 +1065,25 @@ async function cloneMultiWindow(
   // CleanedSourceUnavailableError; raw sourceClass is unaffected by this block.
   let cleanedAssetRel: string | undefined;
   if (sourceClass === 'cleaned') {
-    if (!cleanupIdentity) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity is required when sourceClass is "cleaned".');
-    if (cleanupIdentity.length > 200) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity exceeds the 200-character limit.');
-    if (!manifest) throw new Error('cloneCleanClip: multiWindow.manifest is required when sourceClass is "cleaned" — core verifies cleanup freshness itself.');
+    if (!cleanupIdentity) throw new CleanedSourceUnavailableError('multiWindow.cleanupIdentity is required when sourceClass is "cleaned".');
+    if (!manifest) throw new CleanedSourceUnavailableError('multiWindow.manifest is required when sourceClass is "cleaned" — core verifies cleanup freshness itself.');
+    // Canonical-format gate BEFORE any path construction or cache identity use.
+    // StudioCleanupSchema deliberately keeps cacheKey loose (tightening the parse schema would
+    // refuse to LOAD older or hand-edited manifests wholesale), so every boundary that builds
+    // a path from the key must enforce the sha256-hex form itself: a traversal payload like
+    // "../../media/clip_001/evil" survives the assetPath equality check below (both sides
+    // interpolate the same string) and assertInside (it stays inside the workspace), and would
+    // otherwise launder an arbitrary workspace WAV — or a cache hit keyed to it.
+    if (!SHA256_HEX_RE.test(cleanupIdentity)) {
+      throw new CleanedSourceUnavailableError(`cleanupIdentity "${cleanupIdentity}" is not a canonical sha256 hex key.`);
+    }
     const cleanup = manifest.studioCleanup;
     // (a) approved + (b) fresh — the SAME rule render uses (shared helper, not a re-derivation).
     if (!cleanup || cleanup.status !== 'approved') {
       throw new CleanedSourceUnavailableError(`studioCleanup is ${cleanup ? `status "${cleanup.status}"` : 'absent'} — an approved cleanup is required to clone from the cleaned source.`);
+    }
+    if (!SHA256_HEX_RE.test(cleanup.cacheKey)) {
+      throw new CleanedSourceUnavailableError(`studioCleanup.cacheKey "${cleanup.cacheKey}" is not a canonical sha256 hex key — refusing to build a path from it.`);
     }
     if (!isStudioCleanupFresh(manifest)) {
       throw new CleanedSourceUnavailableError('studioCleanup is STALE (its audioChannelFixFingerprint no longer matches the current channel-fix state) — re-run studio cleanup or clone from raw explicitly.');
@@ -1070,7 +1099,14 @@ async function cloneMultiWindow(
     if (cleanup.assetPath !== expectedRel) {
       throw new CleanedSourceUnavailableError(`studioCleanup.assetPath "${cleanup.assetPath}" is not the expected content-addressed path "${expectedRel}".`);
     }
-    const cleanedAbs = assertInside(workspace, expectedRel);
+    let cleanedAbs: string;
+    try {
+      cleanedAbs = assertInside(workspace, expectedRel);
+    } catch (err) {
+      // assertInside failures inside the cleaned contract are cleaned-contract violations too —
+      // callers branch on CleanedSourceUnavailableError.code, never on generic path errors.
+      throw new CleanedSourceUnavailableError(`cleaned artifact path rejected: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (!existsSync(cleanedAbs)) {
       throw new CleanedSourceUnavailableError(`cleaned artifact missing at ${expectedRel} — regenerate studio cleanup or clone from raw explicitly.`);
     }

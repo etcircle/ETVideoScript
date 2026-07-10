@@ -129,6 +129,19 @@ describe('selectCleanWindows — usability floor + honest failure', () => {
     expect(() => selectCleanWindows({ words: transcript(words), clipId: 'clip_001', pcm16k: pcm }))
       .toThrow(InsufficientCleanWindowsError);
   });
+
+  it('post-pack floor: tuning where no subset satisfies floor AND cap → typed error, never a sub-floor set', () => {
+    // Hermes round-2 repro: two usable ~20s windows, floor 30, cap 30. Any single window is
+    // under the floor; both together exceed the cap — no valid packing exists. The pre-pack
+    // usable aggregate (~40s) passes the first floor check, so only the post-pack guard keeps
+    // the "returned set >= floor or typed error" invariant.
+    const words = [...wordsCovering(0, 20), ...wordsCovering(25, 20)];
+    const pcm = pcmOf(45, (b) => { sine(150, 0, 20, b); sine(150, 25, 45, b); });
+    expect(() => selectCleanWindows({
+      words: transcript(words), clipId: 'clip_001', pcm16k: pcm,
+      windowSec: 20, minUsableAggregateSec: 30, maxTotalSec: 30
+    })).toThrow(InsufficientCleanWindowsError);
+  });
 });
 
 describe('selectCleanWindows — register band demotes (does not exclude)', () => {
@@ -146,9 +159,10 @@ describe('selectCleanWindows — register band demotes (does not exclude)', () =
     expect(all.windows.some((w) => !w.inBand && w.usable)).toBe(true); // out-of-band IS usable
     expect(all.windows.some((w) => w.inBand && w.usable)).toBe(true);
 
-    // With the tight 20s cap, only the in-band 150 Hz windows are kept.
+    // With the tight 20s cap, only the in-band 150 Hz windows are kept. (Floor 15, not 20:
+    // ~10s tiles pack to ~19.8s under the cap, and the post-pack floor guard is exact.)
     const res = selectCleanWindows({
-      words: transcript(words), clipId: 'clip_001', pcm16k: pcm, minUsableAggregateSec: 20, maxTotalSec: 20
+      words: transcript(words), clipId: 'clip_001', pcm16k: pcm, minUsableAggregateSec: 15, maxTotalSec: 20
     });
     expect(Math.abs(res.targetRegisterHz! - 150) / 150).toBeLessThan(0.05);
     expect(res.windows.every((w) => w.usable && w.inBand)).toBe(true);

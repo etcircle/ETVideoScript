@@ -29,7 +29,14 @@ export const StudioCleanupSchema = z.object({
   status: z.enum(['approved', 'disabled', 'pending', 'rejected']),
   /** Workspace-relative path to the cleaned WAV, e.g. "assets/studio-clean/<cacheKey>.wav". */
   assetPath: z.string().min(1),
-  /** SHA-256 hex of the source audio at the time of cleaning. Dedup key. */
+  /**
+   * SHA-256 hex of the source audio at the time of cleaning. Dedup key.
+   * Deliberately NOT regex-tightened here: a stricter parse schema would refuse to load
+   * older/hand-edited manifests wholesale. Boundaries that build filesystem paths from this
+   * key (e.g. cloneCleanClip's cleaned-source contract) must enforce the canonical
+   * ^[0-9a-f]{64}$ form themselves before interpolation — a non-canonical key is a traversal
+   * vector ("../../…" survives same-string equality checks and stays inside the workspace).
+   */
   cacheKey: z.string().min(1),
   /** Provider id, e.g. "studio-sound.elevenlabs-isolation". */
   provider: z.string().min(1),
