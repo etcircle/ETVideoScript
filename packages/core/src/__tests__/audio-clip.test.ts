@@ -171,6 +171,45 @@ describeIfFfmpeg('trimPausesAndSilence', () => {
     const after = readFileSync(inputPath);
     expect(before.equals(after)).toBe(true);
   });
+
+  // Clone-input uses maxPauseSec=1.5 (gentle) instead of the 0.5 default, so a natural
+  // ~1.0s breath pause survives while pathological dead air still gets clipped.
+  function buildPauseFixture(pauseSec: number, name: string): string {
+    const path = join(tempDir, name);
+    spawnSync('ffmpeg', [
+      '-y',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2',
+      '-f', 'lavfi', `-i`, `aevalsrc=0:channel_layout=mono:sample_rate=48000:duration=${pauseSec}`,
+      '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=48000:duration=2',
+      '-filter_complex', '[0][1][2]concat=n=3:v=0:a=1[out]',
+      '-map', '[out]', '-acodec', 'pcm_s16le', path
+    ], { stdio: 'ignore' });
+    return path;
+  }
+
+  it('clone-prep (maxPauseSec=1.5) RETAINS a 1.0s internal pause', async () => {
+    // 2s + 1.0s pause + 2s = 5.0s. With maxPauseSec=1.5 the 1.0s pause is <= threshold,
+    // so it is left untouched → output stays ≈ the full 5.0s (only edge tolerance lost).
+    const inputPath = buildPauseFixture(1.0, 'pause-1s.wav');
+    const outputPath = join(tempDir, 'pause-1s-trimmed.wav');
+    await trimPausesAndSilence(inputPath, outputPath, { maxPauseSec: 1.5 });
+    const outputDur = probeDuration(outputPath);
+    // The 1.0s pause must survive: duration stays well above the 4.0s of pure speech.
+    expect(outputDur).toBeGreaterThan(4.7);
+  }, 30_000);
+
+  it('clone-prep (maxPauseSec=1.5) still TRIMS a 2.0s internal pause down toward the threshold', async () => {
+    // 2s + 2.0s pause + 2s = 6.0s. The 2.0s pause exceeds maxPauseSec=1.5, so ~0.5s of
+    // overflow is deleted → output is meaningfully shorter than the 6.0s input.
+    const inputPath = buildPauseFixture(2.0, 'pause-2s.wav');
+    const inputDur = probeDuration(inputPath);
+    const outputPath = join(tempDir, 'pause-2s-trimmed.wav');
+    await trimPausesAndSilence(inputPath, outputPath, { maxPauseSec: 1.5 });
+    const outputDur = probeDuration(outputPath);
+    expect(outputDur).toBeLessThan(inputDur - 0.2); // overflow beyond 1.5s was removed
+    // But ~1.5s of the pause is retained: output stays above the 4.0s of pure speech + ~1.5s.
+    expect(outputDur).toBeGreaterThan(4.9);
+  }, 30_000);
 });
 
 describeIfFfmpeg('loudnormClip', () => {
@@ -208,6 +247,61 @@ describeIfFfmpeg('loudnormClip', () => {
     const after = readFileSync(inputWav);
     expect(before.equals(after)).toBe(true);
   });
+
+  it('DEFAULT stays the broadcast band (I≈-16 LUFS) — public-API stability', async () => {
+    // Measure the OUTPUT — never trust the filter string alone. Re-run loudnorm in
+    // measurement mode (print_format=json on a dry-run pass) so ffmpeg reports the
+    // achieved integrated loudness + true peak of the already-normalized clip.
+    // Single-pass loudnorm is a level target, not a precise match, so tolerances are
+    // generous where noted.
+    //
+    // DEFAULT = the original broadcast band. loudnormClip is publicly re-exported from
+    // core's index; its default must remain I=-16:TP=-1.5:LRA=11 so external consumers
+    // are not silently re-leveled.
+    const outPath = join(tempDir, 'normed-measured.wav');
+    await loudnormClip(inputWav, outPath);
+    const measure = spawnSync('ffmpeg', [
+      '-hide_banner', '-nostats',
+      '-i', outPath,
+      '-af', 'loudnorm=print_format=json',
+      '-f', 'null', '-'
+    ], { encoding: 'utf8' });
+    // loudnorm prints the JSON block to stderr.
+    const stderr = measure.stderr ?? '';
+    const jsonStart = stderr.lastIndexOf('{');
+    const jsonEnd = stderr.lastIndexOf('}');
+    expect(jsonStart).toBeGreaterThanOrEqual(0);
+    const parsed = JSON.parse(stderr.slice(jsonStart, jsonEnd + 1)) as { input_i: string };
+    const measuredI = Number(parsed.input_i);
+    // Broadcast band: near -16 LUFS, clearly ABOVE (louder than) the clone band's -20.
+    expect(measuredI).toBeGreaterThan(-19);
+    expect(measuredI).toBeLessThan(-13);
+  }, 30_000);
+
+  it('explicit clone-input args land in EL\'s band (I≈-20 LUFS, TP≤-3 dBTP)', async () => {
+    // These are the args cloneCleanClip's prep chain passes explicitly; the numbers EL's
+    // IVC guidance cares about are I in the −23..−18 band and true peak at −3.
+    const outPath = join(tempDir, 'normed-clone-band.wav');
+    await loudnormClip(inputWav, outPath, { integratedLufs: -20, truePeakDb: -3 });
+    const measure = spawnSync('ffmpeg', [
+      '-hide_banner', '-nostats',
+      '-i', outPath,
+      '-af', 'loudnorm=print_format=json',
+      '-f', 'null', '-'
+    ], { encoding: 'utf8' });
+    const stderr = measure.stderr ?? '';
+    const jsonStart = stderr.lastIndexOf('{');
+    const jsonEnd = stderr.lastIndexOf('}');
+    expect(jsonStart).toBeGreaterThanOrEqual(0);
+    const parsed = JSON.parse(stderr.slice(jsonStart, jsonEnd + 1)) as { input_i: string; input_tp: string };
+    const measuredI = Number(parsed.input_i);
+    const measuredTp = Number(parsed.input_tp);
+    // Integrated loudness sits inside the clone-input band (allow ±3 LU single-pass slop).
+    expect(measuredI).toBeGreaterThan(-23);
+    expect(measuredI).toBeLessThan(-17);
+    // True peak respects the −3 dBTP ceiling (tight: 0.1 dB measurement tolerance only).
+    expect(measuredTp).toBeLessThanOrEqual(-2.9);
+  }, 30_000);
 });
 
 describeIfFfmpeg('clone-path isolation — no 16k STT or source mutation', () => {

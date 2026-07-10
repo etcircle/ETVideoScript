@@ -59,10 +59,14 @@ export async function sliceAudioWindow(
   }
 }
 
-// Trim leading/trailing silence AND collapse long internal pauses in one pass.
+// Trim leading/trailing silence AND DELETE the overflow of long internal pauses in one pass.
 // Uses ffmpeg silenceremove:
 //   start_periods=1: trim leading silence
-//   stop_periods=-1: multi-region — remove every internal+trailing silence longer than stop_duration
+//   stop_periods=-1: multi-region — for every internal+trailing silence, DELETE the portion
+//                    beyond stop_duration seconds (it does NOT collapse a pause to a fixed
+//                    length — silenceremove has no collapse-to-N primitive; a 2.0s pause with
+//                    stop_duration=1.5 keeps ~1.5s and drops the rest; a pause <= stop_duration
+//                    is untouched). maxPauseSec IS stop_duration: the max pause LENGTH RETAINED.
 // Writes atomically via mkdtemp → rename (never edits inAbsPath in place).
 export async function trimPausesAndSilence(
   inAbsPath: string,
@@ -88,19 +92,34 @@ export async function trimPausesAndSilence(
   }
 }
 
-// Single-pass loudnorm to broadcast target (I=-16 LUFS, TP=-1.5 dBTP, LRA=11 LU).
-// Reuses the exact filter string from audioEnhance.ts. This is NOT the two-pass
-// measured loudnorm match (that's W5/postMatchSeam) — just a consistent level for
-// the clone clip fed to Cartesia IVC.
+// Single-pass loudnorm of a clip to a target level. This is NOT the two-pass measured
+// loudnorm match (that's W5/postMatchSeam) — just a consistent level for a prepared clip.
+//
+// DEFAULT target = the original broadcast level I=-16 LUFS, TP=-1.5 dBTP, LRA=11 —
+// byte-identical to the filter this primitive has always run. It must STAY the default:
+// loudnormClip is publicly re-exported from core's index, so a changed default would
+// silently re-level every external consumer by several LU. Callers needing a different
+// band pass it explicitly — e.g. cloneCleanClip's prep chain passes
+// { integratedLufs: -20, truePeakDb: -3 } (ElevenLabs' IVC input band; the LUFS↔RMS
+// equivalence rationale lives at that call site in voiceClone.ts). LRA=11 is kept in the
+// filter for every target: I/TP carry the level contract, and pinning LRA preserves the
+// original default behavior exactly while remaining harmless for short speech clips
+// (single-pass loudnorm falls back to dynamic mode on clips shorter than its 3s window).
 // Writes atomically via mkdtemp → rename.
-export async function loudnormClip(inAbsPath: string, outAbsPath: string): Promise<void> {
+export async function loudnormClip(
+  inAbsPath: string,
+  outAbsPath: string,
+  opts?: { integratedLufs?: number; truePeakDb?: number }
+): Promise<void> {
   if (!existsSync(inAbsPath)) throw new Error(`loudnormClip: input not found: ${inAbsPath}`);
   assertDistinctPaths(inAbsPath, outAbsPath, 'loudnormClip');
+  const integratedLufs = opts?.integratedLufs ?? -16;
+  const truePeakDb = opts?.truePeakDb ?? -1.5;
   mkdirSync(dirname(outAbsPath), { recursive: true });
   const tempDir = mkdtempSync(join(dirname(outAbsPath), '.norm-'));
   const stage = join(tempDir, 'normed.wav');
   try {
-    run('ffmpeg', ['-y', '-v', 'error', '-i', inAbsPath, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-acodec', 'pcm_s16le', stage]);
+    run('ffmpeg', ['-y', '-v', 'error', '-i', inAbsPath, '-af', `loudnorm=I=${integratedLufs}:TP=${truePeakDb}:LRA=11`, '-acodec', 'pcm_s16le', stage]);
     renameSync(stage, outAbsPath);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

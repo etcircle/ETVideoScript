@@ -4,11 +4,12 @@ import { randomBytes } from 'node:crypto';
 import { assertInside } from './filesystem';
 import { extractFullBandReference } from './media';
 import { loadTranscript } from './transcript';
-import { cloneCartesiaVoice } from './providers';
+import { cloneCartesiaVoice, cloneElevenLabsVoice, type VoiceCloneSample } from './providers';
 import {
   readVoicesLibrary,
   upsertVoice,
   type VoiceRecord,
+  type VoiceProvider,
   type SettingsPathsInput
 } from './providerSettings';
 import type { TranscriptWords } from './schemas';
@@ -33,12 +34,57 @@ function windowOverlaps(
 }
 import { sliceAudioWindow, trimPausesAndSilence, loudnormClip } from './audioClip';
 
+// ── Clone-provider dispatch ──────────────────────────────────────────────────────
+// Mirrors the CLONE_PROVIDERS table in apps/local-api settingsRoutes.ts so cloneCleanClip
+// dispatches by the SAME provider identity the /voices/clone route uses (no divergent
+// second dispatch). Both adapters return { voiceId } and accept this exact call shape;
+// Cartesia's extra optionals (language/baseUrl/timeoutMs) default inside its adapter, and
+// baseUrl is threaded through where the caller supplies one. Typed (no `any`) so a
+// signature drift in either adapter is caught at compile time.
+//
+// maxSamples encodes the provider's clip capability. WIRING ONLY: cloneCleanClip prepares a
+// SINGLE window today and submits it as one sample regardless of provider — the multi-window
+// scorer that would fill EL's 25-sample budget is future work and deliberately NOT built here.
+// EL simply accepts the one prepared window as one sample (well under its 25 cap).
+type CloneFn = (input: {
+  name: string;
+  samples: VoiceCloneSample[];
+  secret: string;
+  baseUrl?: string;
+  signal: AbortSignal;
+}) => Promise<{ voiceId: string }>;
+const CLONE_PROVIDERS: Record<VoiceProvider, { clone: CloneFn; maxSamples: number }> = {
+  elevenlabs: { clone: cloneElevenLabsVoice, maxSamples: 25 },
+  cartesia: { clone: cloneCartesiaVoice, maxSamples: 1 }
+};
+// There is deliberately NO default clone provider in core. `provider` is REQUIRED on
+// CloneCleanClipParams: cloneCleanClip was Cartesia-hardwired for its whole life, so a silent
+// core-side default (to anything) would make an existing caller skip its legacy Cartesia
+// cache records and burn a remote voice slot on the wrong provider without any code change on
+// its side. Defaulting is ROUTE policy — the /voices/clone route owns it (settingsRoutes.ts:
+// `fields.provider ?? 'elevenlabs'`); every caller of cloneCleanClip must resolve the
+// provider the same way and pass it explicitly.
+
 // ── Constants (locked defaults) ────────────────────────────────────────────────
 const TARGET_SEC = 10;
 const MIN_SEC = 6;
 // Exported so transcriptSpan.ts can import and alias as BREATH_GAP_SEC without
 // diverging from the constant used here. Never redeclare 0.35 elsewhere.
 export const MAX_INTERNAL_GAP = 0.35;
+// ── Pause policy: two thresholds, two jobs — this is intentional, not drift ────
+// MAX_INTERNAL_GAP (0.35s) governs SELECTION: splitRuns breaks candidate windows at any
+// inter-word gap > 0.35s, so an AUTO-SELECTED window can never contain a 0.5–1.5s pause.
+// That is deliberate (consistency-over-diversity): continuous-speech windows clone the most
+// stable identity, and the tight gap cap is also what keeps enumerateWindows' O(runLen²)
+// window budget bounded — do NOT loosen it to "let breaths into" auto-selected windows.
+// CLONE_PREP_MAX_PAUSE_SEC (1.5s) governs PREP: trimPausesAndSilence at the clone-prep call
+// site retains internal pauses up to 1.5s instead of the primitive's 0.5s default, because
+// aggressive pause DELETION teaches the clone a rushed cadence (June evidence — same artifact
+// family as infill's cold re-attacks). For auto-selected windows this retention is inert (see
+// above: such windows contain no gap > 0.35s). It protects the EXPLICIT referenceRange /
+// manual path (which the Phase-1 experiment cells drive) and any future multi-window
+// assembly, where windows CAN legitimately contain natural breath pauses.
+export const CLONE_PREP_MAX_PAUSE_SEC = 1.5;
 const SLACK_SEC = 1.5;
 const CACHE_EPSILON = 0.05; // seconds tolerance for range cache matching
 
@@ -76,6 +122,19 @@ export interface CloneCleanClipParams {
   referenceRange?: { clipId: string; start: number; end: number };
   target?: { clipId: string; start: number; end: number };
   name?: string;
+  // Clone provider. REQUIRED — core deliberately has no default (see the note above
+  // CLONE_PROVIDERS): the caller (route/CLI) owns default resolution, exactly as the
+  // /voices/clone route does (`fields.provider ?? 'elevenlabs'`). The `secret`/`baseUrl`
+  // supplied must belong to THIS provider — cloneCleanClip does not read secrets; the
+  // caller resolves them per provider (same as the route).
+  provider: VoiceProvider;
+  // Stable NON-SECRET identifier for the credential/account behind `secret` (e.g. the
+  // secrets-store key name, optionally suffixed with the endpoint host). NEVER the secret
+  // value. Used to scope cache reuse: the same provider under a different account must not
+  // cache-hit (the remote voiceId would not exist there). Optional — when omitted, core
+  // falls back to the baseUrl host (a non-default endpoint implies a distinct tenant), and
+  // with neither the record is account-unscoped (matches like a legacy record).
+  accountRef?: string;
   secret: string;
   baseUrl?: string;
   signal: AbortSignal;
@@ -317,6 +376,8 @@ function findCachedVoice(
   settingsInput: SettingsPathsInput,
   projectId: string | undefined,
   scope: 'local' | 'project',
+  provider: VoiceProvider,
+  accountRef: string | undefined,
   range: { clipId: string; start: number; end: number }
 ): VoiceRecord | null {
   // Cache reuse is strictly project-scoped. The voices library is GLOBAL, so without a
@@ -326,7 +387,26 @@ function findCachedVoice(
   if (!projectId) return null;
   const library = readVoicesLibrary(settingsInput).value;
   for (const v of library.voices) {
-    if (v.provider !== 'cartesia') continue;
+    // Per-provider match: an EL clone must never be reused for a Cartesia request (or vice
+    // versa) — the voiceId is provider-namespaced and the speaker identity differs. Legacy
+    // records carry provider: 'cartesia' (upsertVoice always set it), so a Cartesia request
+    // still cache-hits them here — backward-compatible, no migration needed.
+    if (v.provider !== provider) continue;
+    // Per-account match — SYMMETRIC by tag class. A voiceId only exists in the account that
+    // created it, so:
+    //   • tagged request  → matches ONLY records with the IDENTICAL accountRef (an untagged
+    //     legacy record could have been created under ANY account; reusing it from a tagged
+    //     request would 404 in the requester's account — or worse, resolve to a different
+    //     user's voice on a shared endpoint);
+    //   • untagged request → matches ONLY untagged records (preserves legacy single-account
+    //     behavior among legacy records; disabling untagged↔untagged would silently re-clone
+    //     and burn a voice slot for the common single-account setup).
+    // Never match across tag classes in either direction. Residual known limit: two accounts
+    // BOTH making untagged requests are indistinguishable — callers that switch accounts must
+    // tag their requests (the future route caller always will). Strict !== implements exactly
+    // class-then-value equality: undefined===undefined for the untagged class, string
+    // equality within the tagged class.
+    if (v.accountRef !== accountRef) continue;
     if (v.cloneScope !== scope) continue;
     if (v.originProjectId !== projectId) continue;
     const sar = v.sourceAudioRange;
@@ -346,6 +426,24 @@ export async function cloneCleanClip(
   params: CloneCleanClipParams & SettingsPathsInput & { projectId?: string }
 ): Promise<CloneCleanClipResult> {
   const workspace = resolve(workspacePath);
+
+  // Provider is REQUIRED (no core default — see CLONE_PROVIDERS note). The runtime guard
+  // still matters despite the type: params commonly arrive from parsed JSON bodies where a
+  // bad string would otherwise dispatch to `undefined.clone`.
+  const provider: VoiceProvider = params.provider;
+  const cloneCfg = CLONE_PROVIDERS[provider];
+  if (!cloneCfg) throw new Error(`cloneCleanClip: unsupported clone provider "${provider}". Pass 'elevenlabs' or 'cartesia' explicitly — core has no default.`);
+  // Account discriminator for cache scoping. Prefer the caller's explicit non-secret
+  // identifier; fall back to the baseUrl host (a non-default endpoint implies a distinct
+  // tenant). NEVER derived from the secret value. Undefined ⇒ account-unscoped record
+  // (legacy-equivalent matching semantics in findCachedVoice).
+  // Trim here so cache matching and the persisted record see one canonical form. An
+  // explicitly-provided-but-blank accountRef is a caller bug and is rejected in the
+  // preflight below — it does NOT silently fall back to the baseUrl derivation.
+  let accountRef: string | undefined = params.accountRef?.trim();
+  if (params.accountRef === undefined && params.baseUrl) {
+    try { accountRef = new URL(params.baseUrl).host; } catch { /* malformed baseUrl fails later in the adapter with a clearer error */ }
+  }
 
   // Determine the selection
   let selection: CleanClipSelection;
@@ -384,7 +482,7 @@ export async function cloneCleanClip(
 
   // Cache check: look for an existing voice with matching scope/project/range
   const settingsInput: SettingsPathsInput = { homeDir: params.homeDir, workspacePath: params.workspacePath, etvsDir: params.etvsDir };
-  const cached = findCachedVoice(settingsInput, params.projectId, selection.scope, {
+  const cached = findCachedVoice(settingsInput, params.projectId, selection.scope, provider, accountRef, {
     clipId: selection.clipId,
     start: selection.start,
     end: selection.end
@@ -402,6 +500,12 @@ export async function cloneCleanClip(
   if (voiceName.length < 1 || voiceName.length > 200) throw new Error(`cloneCleanClip: voice name must be 1–200 characters (got ${voiceName.length}).`);
   if (selection.clipId.length > 128) throw new Error(`cloneCleanClip: clipId "${selection.clipId}" exceeds the 128-character sourceAudioRange limit.`);
   if (params.projectId !== undefined && params.projectId.length > 200) throw new Error('cloneCleanClip: projectId exceeds the 200-character originProjectId limit.');
+  // accountRef preflight — same rationale as the fields above: VoiceRecordSchema requires
+  // 1..200 chars when present, and upsertVoice only runs AFTER the remote clone succeeds. An
+  // invalid accountRef must fail HERE, not consume a provider voice slot and then strand the
+  // clone with no local cache record.
+  if (accountRef !== undefined && accountRef.length === 0) throw new Error('cloneCleanClip: accountRef must be non-empty when provided (it is the cache\'s account discriminator; omit it entirely for an account-unscoped clone).');
+  if (accountRef !== undefined && accountRef.length > 200) throw new Error(`cloneCleanClip: accountRef exceeds the 200-character limit (got ${accountRef.length}).`);
 
   // Extract 48k full-band reference (never the 16k STT copy)
   const refRel = await extractFullBandReference(workspace, selection.clipId);
@@ -438,13 +542,28 @@ export async function cloneCleanClip(
 
   try {
     await sliceAudioWindow(refAbs, selection.start, selection.end, slicedPath);
-    await trimPausesAndSilence(slicedPath, trimmedPath);
-    await loudnormClip(trimmedPath, normedPath);
+    // Gentle pause handling for CLONE INPUT — see the pause-policy block at
+    // CLONE_PREP_MAX_PAUSE_SEC / MAX_INTERNAL_GAP for why prep retention (1.5s) and
+    // selection gap (0.35s) differ on purpose. trimPausesAndSilence DELETES the overflow of
+    // any internal pause beyond maxPauseSec (it does not collapse — see its doc); the
+    // primitive's 0.5s default would shave natural breaths and teach a rushed cadence.
+    await trimPausesAndSilence(slicedPath, trimmedPath, { maxPauseSec: CLONE_PREP_MAX_PAUSE_SEC });
+    // Clone-input level target: I=-20 LUFS, TP=-3 dBTP. ElevenLabs' IVC guidance is a
+    // −23..−18 dB RMS window with true peak at −3; loudnorm's I is integrated LUFS (K-weighted
+    // loudness), not raw RMS, but for speech the two track within ~1 dB, so I=-20 lands inside
+    // EL's RMS band and TP=-3 matches the ceiling verbatim. Passed EXPLICITLY: loudnormClip's
+    // own default stays the broadcast target (I=-16/TP=-1.5) because it is publicly exported
+    // from core — external consumers must not silently drop 4 LU.
+    await loudnormClip(trimmedPath, normedPath, { integratedLufs: -20, truePeakDb: -3 });
 
     // Read prepared audio as buffer (voiceName was computed + validated above, pre-clone)
     const audio = readFileSync(normedPath);
 
-    const cloneResult = await cloneCartesiaVoice({
+    // Provider-dispatched clone. WIRING ONLY: exactly one prepared window is submitted as a
+    // single sample for EVERY provider — behavior is identical to the old Cartesia-hardwired
+    // path (which also sent one sample). EL accepts the one sample (well under its 25 cap);
+    // filling EL's multi-sample budget is future work (the multi-window scorer), not this wave.
+    const cloneResult = await cloneCfg.clone({
       name: voiceName,
       samples: [{ audio, fileName: 'clip.wav', mimeType: 'audio/wav' }],
       secret: params.secret,
@@ -453,17 +572,20 @@ export async function cloneCleanClip(
     });
 
     // The provider handle must fit VoiceRecordSchema (voiceId max 128) or upsertVoice throws
-    // AFTER the remote clone exists. cloneCartesiaVoice already guarantees a non-empty trimmed
-    // string; guard the length too for a clear error rather than a schema stack trace.
-    if (cloneResult.voiceId.length > 128) throw new Error('cloneCleanClip: Cartesia returned a voice id longer than 128 chars; the remote clone was created but cannot be persisted locally.');
+    // AFTER the remote clone exists. Both adapters guarantee a non-empty trimmed string; guard
+    // the length too for a clear error rather than a schema stack trace.
+    if (cloneResult.voiceId.length > 128) throw new Error(`cloneCleanClip: ${provider} returned a voice id longer than 128 chars; the remote clone was created but cannot be persisted locally.`);
     const voiceId = `voice-${randomBytes(4).toString('hex')}`;
     const voice = upsertVoice({
       ...settingsInput,
       voice: {
         id: voiceId,
         name: voiceName,
-        provider: 'cartesia',
+        provider,
         voiceId: cloneResult.voiceId,
+        // Account-tag new records only when we HAVE a discriminator — writing a synthetic
+        // one for the default account would stop legacy-style (unscoped) requests matching.
+        ...(accountRef !== undefined ? { accountRef } : {}),
         ...(params.projectId ? { originProjectId: params.projectId } : {}),
         cloneScope: selection.scope,
         sourceAudioRange: { clipId: selection.clipId, start: selection.start, end: selection.end },
