@@ -150,6 +150,28 @@ export const VoiceRecordSchema = z.object({
     start: z.number().nonnegative(),
     end: z.number().nonnegative()
   }).refine((r) => r.end > r.start, 'sourceAudioRange.end must be greater than start').optional(),
+  // S1a multi-window clone additions — ALL optional so legacy voices.json parses unchanged.
+  // Cache matching in cloneCleanClip is CLASS-SYMMETRIC on these, exactly like accountRef:
+  // a legacy record (no sourceClass/windows) matches ONLY legacy-shaped requests, and a
+  // cleaned/multi-window request NEVER matches a legacy record (and vice versa). See
+  // findCachedVoice in voiceClone.ts.
+  //
+  // Which base audio the clone samples came from: 'raw' = the 48k reference derivative,
+  // 'cleaned' = the fresh EL-Isolator studioCleanup bed. Absent ⇒ legacy (raw-equivalent).
+  sourceClass: z.enum(['raw', 'cleaned']).optional(),
+  // Cleanup identity = studioCleanup.cacheKey (the source-audio hash) at clone time. Present
+  // ONLY for sourceClass:'cleaned' — it pins the clone to the exact cleaned bed so a
+  // re-cleaned recording (new cacheKey) misses and re-clones. Never set for raw clones.
+  cleanupIdentity: z.string().min(1).max(200).optional(),
+  // The exact asset-axis windows uploaded as samples, in canonical ascending-start order.
+  // A multi-window clone records ALL of them; a legacy single-window clone omits this field
+  // (its lone range lives in sourceAudioRange, kept for back-compat). A change to the window
+  // SET is a cache miss.
+  windows: z.array(z.object({
+    clipId: z.string().min(1).max(128),
+    start: z.number().nonnegative(),
+    end: z.number().nonnegative()
+  }).refine((w) => w.end > w.start, 'window.end must be greater than start')).min(1).optional(),
   provenance: z.object({
     method: z.enum(['ivc', 'upload', 'enroll', 'project-range']).optional(),
     createdBy: z.enum(['clone-route', 'enroll-route', 'manual']).optional(),
