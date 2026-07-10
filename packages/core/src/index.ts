@@ -15,6 +15,7 @@ export * from './waveform';
 export * from './audioEnhance';
 export * from './voiceReference';
 export * from './voiceClone';
+export * from './pitch';
 export * from './transcriptSpan';
 export * from './audioClip';
 export * from './postMatchSeam';
