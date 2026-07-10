@@ -29,6 +29,30 @@ export function sourceChannelFixFingerprint(manifest: ManifestV3): string {
   return channelFixFingerprint(resolveChannelFixForAsset(manifest, 'input/source.mp4'));
 }
 
+/**
+ * Cleanup-freshness rule, factored out of buildRenderPlan so the multi-window clone
+ * selector (voiceClone.ts) mirrors render's staleness semantics EXACTLY instead of
+ * re-deriving them (drift here would let a clone train from a stale cleaned bed while
+ * render falls back to raw — the dry-on-dry invariant the plan pins). This is the PURE
+ * half only: approved + fingerprint-current. The "artifact bytes exist on disk" check
+ * stays at the Node call sites (render pipeline / cloneCleanClip) because this module is
+ * browser-reachable and must not touch node:fs.
+ *
+ * A cleanup with a MISSING audioChannelFixFingerprint counts as stale only when an
+ * audioChannelFix record actually exists to compare against — a cleanup with no
+ * channel-fix history at all (the common case, and every pre-fingerprint manifest) is
+ * never stale on this axis. Byte-identical to render/plan.ts:236-239.
+ */
+export function isStudioCleanupFresh(manifest: ManifestV3): boolean {
+  const cleanup = manifest.studioCleanup;
+  if (!cleanup || cleanup.status !== 'approved') return false;
+  // Stale iff a channel-fix record exists AND the cleanup's recorded fingerprint no
+  // longer matches the current one. No channel-fix history ⇒ never stale.
+  const stale = !!manifest.audioChannelFix
+    && cleanup.audioChannelFixFingerprint !== sourceChannelFixFingerprint(manifest);
+  return !stale;
+}
+
 /** ffmpeg pan filter selecting only the live channel into a mono output. */
 export function channelFixMonoPan(sourceChannel: 'left' | 'right'): string {
   return `pan=mono|c0=${sourceChannel === 'left' ? 'c0' : 'c1'}`;

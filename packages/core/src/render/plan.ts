@@ -1,5 +1,5 @@
 import type { ManifestV3 } from '../manifest/schema';
-import { resolveChannelFixForAsset, sourceChannelFixFingerprint } from '../channelFixScope';
+import { resolveChannelFixForAsset, isStudioCleanupFresh } from '../channelFixScope';
 import { getOperationKind } from '../operations/registry';
 import type { RenderStage } from './types';
 import type { Clip, Track } from '../tracks/schema';
@@ -232,11 +232,13 @@ export function buildRenderPlan(manifest: ManifestV3, transcript?: TranscriptWor
   // creation time; a MISSING fingerprint only counts as stale when an audioChannelFix
   // record actually exists to compare against — a cleanup + no channel-fix history at
   // all (the common case, and every pre-fingerprint-field manifest) is never stale.
-  const currentFixFingerprint = sourceChannelFixFingerprint(manifest);
+  // Staleness is now the negation of the SHARED freshness rule (channelFixScope.
+  // isStudioCleanupFresh) so the multi-window clone selector mirrors render exactly.
+  // studioCleanupStale keeps its historical meaning — approved-but-not-fresh — because
+  // isStudioCleanupFresh returns false for a non-approved cleanup too; guard on approved
+  // so a pending/disabled cleanup is not reported as "stale".
   const studioCleanupStale =
-    manifest.studioCleanup?.status === 'approved'
-    && !!manifest.audioChannelFix
-    && manifest.studioCleanup.audioChannelFixFingerprint !== currentFixFingerprint;
+    manifest.studioCleanup?.status === 'approved' && !isStudioCleanupFresh(manifest);
 
   // SCOPE GUARD (issue #5): studioCleanup describes ONLY input/source.mp4's audio — a
   // project whose single remaining video source is some OTHER asset (e.g. the base clip
