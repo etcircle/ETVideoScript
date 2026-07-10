@@ -165,6 +165,41 @@ describe('selectCleanWindows — register band demotes (does not exclude)', () =
   });
 });
 
+describe('selectCleanWindows — tuning sanity', () => {
+  it('rejects maxTotalSec < minUsableAggregateSec as a caller bug (unsatisfiable by construction)', () => {
+    const words = wordsCovering(0, 5);
+    const pcm = pcmOf(5, (b) => sine(150, 0, 5, b));
+    expect(() => selectCleanWindows({
+      words: transcript(words), clipId: 'clip_001', pcm16k: pcm,
+      minUsableAggregateSec: 30, maxTotalSec: 20
+    })).toThrow(/maxTotalSec .* must be >= minUsableAggregateSec/);
+  });
+});
+
+describe('selectCleanWindows — target register excludes inter-word gaps', () => {
+  it('voiced non-speech in ≤0.35s gaps cannot pollute the target register median', () => {
+    // Words are 0.3s of 150 Hz speech separated by 0.34s gaps filled with a 250 Hz tone
+    // (music bed / hum; 0.34 not 0.35 so float noise can't push a gap over the 0.35s run
+    // split). Gap content is ~53% of the timeline — a run-span register (first word → last
+    // word) would land its MEDIAN at 250 Hz; per-WORD slicing must keep the target at
+    // ~150 Hz because the transcript only attributes the word spans to speech.
+    const count = 64; // ~41s of pattern → enough usable aggregate
+    const gapWords: ReturnType<typeof wordsCovering> = [];
+    for (let i = 0; i < count; i++) gapWords.push(word(i * 0.64, i * 0.64 + 0.3));
+    const totalSec = count * 0.64 + 1;
+    const pcm = pcmOf(totalSec, (b) => {
+      for (let i = 0; i < count; i++) {
+        const c = i * 0.64;
+        sine(150, c, c + 0.3, b); // the word (speech)
+        sine(250, c + 0.3, c + 0.64, b); // the gap (voiced non-speech)
+      }
+    });
+    const res = selectCleanWindows({ words: transcript(gapWords), clipId: 'clip_001', pcm16k: pcm });
+    expect(res.targetRegisterHz).not.toBeNull();
+    expect(Math.abs(res.targetRegisterHz! - 150) / 150).toBeLessThan(0.03);
+  });
+});
+
 describe('selectCleanWindows — respects a supplied target register', () => {
   it('honors an explicit targetRegisterHz for band classification', () => {
     const words = wordsCovering(0, 40);

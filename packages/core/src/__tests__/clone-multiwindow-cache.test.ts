@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cloneCleanClip } from '../voiceClone';
+import { cloneCleanClip, CleanedSourceUnavailableError } from '../voiceClone';
 import { readVoicesLibrary, upsertVoice, type SettingsPathsInput } from '../providerSettings';
 import { saveManifestV3, type ManifestV3 } from '../index';
 
@@ -50,7 +50,6 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
   let workspace: string;
   let settingsInput: SettingsPathsInput;
   let originalFetch: typeof globalThis.fetch;
-  let cleanedRel: string;
 
   beforeAll(() => {
     workspace = mkdtempSync(join(tmpdir(), 'etvs-clone-mw-'));
@@ -63,14 +62,37 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
       '-c:a', 'aac', '-b:a', '128k', '-shortest', '-y', join(workspace, 'input', 'source.mp4')
     ], { stdio: 'ignore' });
     saveManifestV3(workspace, fixtureManifest(SOURCE_DURATION), { revision: false });
-    // A stand-in "cleaned" WAV (length-preserving) for sourceClass:'cleaned' prep.
-    cleanedRel = 'assets/studio-clean/testkey.wav';
+    // Stand-in "cleaned" WAVs (length-preserving) at the CONTENT-ADDRESSED paths core now
+    // enforces (assets/studio-clean/<cacheKey>.wav) — one per cacheKey the tests use.
     mkdirSync(join(workspace, 'assets', 'studio-clean'), { recursive: true });
-    spawnSync('ffmpeg', [
-      '-f', 'lavfi', '-i', `sine=frequency=150:sample_rate=48000:duration=${SOURCE_DURATION}`,
-      '-ac', '1', '-ar', '48000', '-acodec', 'pcm_s16le', '-y', join(workspace, cleanedRel)
-    ], { stdio: 'ignore' });
+    for (const key of ['cacheKeyA', 'cacheKeyB', 'k']) {
+      spawnSync('ffmpeg', [
+        '-f', 'lavfi', '-i', `sine=frequency=150:sample_rate=48000:duration=${SOURCE_DURATION}`,
+        '-ac', '1', '-ar', '48000', '-acodec', 'pcm_s16le', '-y', join(workspace, 'assets', 'studio-clean', `${key}.wav`)
+      ], { stdio: 'ignore' });
+    }
   }, 90_000);
+
+  // Manifest subset core verifies the cleaned source against: an approved cleanup for
+  // `cacheKey` at its content-addressed path, plus tracks/assets from the fixture (clip_001 →
+  // input/source.mp4). `over` lets negative tests break exactly one invariant at a time.
+  function cleanedManifest(cacheKey: string, over: Partial<NonNullable<ManifestV3['studioCleanup']>> & { audioChannelFix?: ManifestV3['audioChannelFix'] } = {}) {
+    const { audioChannelFix, ...cleanupOver } = over;
+    const fixture = fixtureManifest(SOURCE_DURATION);
+    return {
+      studioCleanup: {
+        status: 'approved' as const,
+        assetPath: `assets/studio-clean/${cacheKey}.wav`,
+        cacheKey,
+        provider: 'studio-sound.elevenlabs-isolation',
+        createdAt: '2026-07-10T00:00:00.000Z',
+        ...cleanupOver
+      },
+      audioChannelFix,
+      tracks: fixture.tracks,
+      assets: fixture.assets
+    };
+  }
 
   afterAll(() => { if (workspace) rmSync(workspace, { recursive: true, force: true }); });
   beforeEach(() => { originalFetch = globalThis.fetch; });
@@ -190,7 +212,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     );
     const cleanedReq = (cacheKey: string) => ({
       ...settingsInput, projectId: 'proj-cleaned', scope: 'project' as const, provider: 'elevenlabs' as const,
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned' as const, cleanupIdentity: cacheKey, cleanedAssetPath: cleanedRel },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned' as const, cleanupIdentity: cacheKey, manifest: cleanedManifest(cacheKey) },
       secret: 'el-key', signal: new AbortController().signal
     });
     const first = await cloneCleanClip(workspace, cleanedReq('cacheKeyA'));
@@ -221,7 +243,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     );
     const result = await cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-mw', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'k', cleanedAssetPath: cleanedRel },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'k', manifest: cleanedManifest('k') },
       secret: 'el-key', signal: new AbortController().signal
     });
     expect(result.cached).toBe(false);
@@ -255,7 +277,7 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
     (globalThis as any).fetch = fetchSpy;
     await expect(cloneCleanClip(workspace, {
       ...settingsInput, projectId: 'proj-bad', scope: 'project', provider: 'elevenlabs',
-      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanedAssetPath: cleanedRel },
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', manifest: cleanedManifest('cacheKeyA') },
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/cleanupIdentity is required/);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -270,5 +292,153 @@ describeIfFfmpeg('cloneCleanClip — multi-window mode + cache identity', () => 
       secret: 'el-key', signal: new AbortController().signal
     })).rejects.toThrow(/ascending-start order/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  // ── Hermes S1a review fold: core-enforced cleaned contract + single-clip + partial shapes ──
+
+  it('rejects mixed-clip windows BEFORE any remote call (single-clip invariant)', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-bad', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: [{ clipId: 'clip_001', start: 1, end: 11 }, { clipId: 'clip_002', start: 15, end: 25 }], sourceClass: 'raw' },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/ONE clip/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('STALE cleanup → typed error, NO cache hit and NO remote call (even with a matching record)', async () => {
+    // proj-cleaned already holds a matching cacheKeyA record from the earlier test. A stale
+    // cleanup must NOT even serve that cache hit — validation precedes the cache read.
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    const staleManifest = cleanedManifest('cacheKeyA', {
+      // A channel fix exists but the cleanup carries no matching fingerprint → stale by the
+      // same rule render uses.
+      audioChannelFix: { status: 'approved', sourceChannel: 'left', detection: { leftRmsDb: -12, rightRmsDb: -60, auto: true }, appliedAt: '2026-07-10T00:00:00.000Z' }
+    });
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA', manifest: staleManifest },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(CleanedSourceUnavailableError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('non-approved cleanup → typed error before cache/remote', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA', manifest: cleanedManifest('cacheKeyA', { status: 'disabled' }) },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/status "disabled"/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('cleanupIdentity that does not match studioCleanup.cacheKey → typed error', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
+      // Manifest says cacheKeyA; the request claims cacheKeyB → windows were selected against
+      // a different cleanup generation.
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyB', manifest: cleanedManifest('cacheKeyA') },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/does not match the manifest's studioCleanup.cacheKey/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('missing cleaned artifact → typed error before cache/remote', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    // 'ghostKey' has an approved manifest record but no WAV on disk.
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'ghostKey', manifest: cleanedManifest('ghostKey') },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/cleaned artifact missing/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('assetPath that is not the content-addressed path for cacheKey → typed error', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
+      multiWindow: {
+        windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA',
+        // Hand-edited assetPath pointing at a DIFFERENT (existing) file must not be trusted.
+        manifest: cleanedManifest('cacheKeyA', { assetPath: 'assets/studio-clean/cacheKeyB.wav' })
+      },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/not the expected content-addressed path/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('cleaned windows on a clip that is not the base recording → typed error', async () => {
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
+    // Manifest whose clip_001 belongs to an asset that is NOT input/source.mp4.
+    const manifest = cleanedManifest('cacheKeyA');
+    manifest.assets = [{ ...manifest.assets[0]!, path: 'input/other-import.mp4' }];
+    await expect(cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-cleaned', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: WINDOWS, sourceClass: 'cleaned', cleanupIdentity: 'cacheKeyA', manifest },
+      secret: 'el-key', signal: new AbortController().signal
+    })).rejects.toThrow(/studioCleanup describes only input\/source.mp4/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 90_000);
+
+  it('partial new-shape records never match a LEGACY request (class matrix)', async () => {
+    const range = { clipId: 'clip_001', start: 2, end: 9 };
+    // Three partially-new records, each carrying exactly ONE of the trio, with a
+    // sourceAudioRange that would match the legacy request below if class-checking failed.
+    upsertVoice({ ...settingsInput, voice: {
+      id: 'partial-sc', name: 'P1', provider: 'elevenlabs', voiceId: 'el_partial_sc',
+      originProjectId: 'proj-matrix', cloneScope: 'project', sourceAudioRange: range, sourceClass: 'raw'
+    } });
+    upsertVoice({ ...settingsInput, voice: {
+      id: 'partial-ci', name: 'P2', provider: 'elevenlabs', voiceId: 'el_partial_ci',
+      originProjectId: 'proj-matrix', cloneScope: 'project', sourceAudioRange: range, cleanupIdentity: 'someKey'
+    } });
+    upsertVoice({ ...settingsInput, voice: {
+      id: 'partial-w', name: 'P3', provider: 'elevenlabs', voiceId: 'el_partial_w',
+      originProjectId: 'proj-matrix', cloneScope: 'project', sourceAudioRange: range,
+      windows: [{ clipId: 'clip_001', start: 2, end: 9 }]
+    } });
+    const calls: string[] = [];
+    (globalThis as any).fetch = vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ voice_id: 'el_fresh_matrix' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    // LEGACY request over the same range: all three partial records must be skipped.
+    const result = await cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-matrix', scope: 'project', provider: 'elevenlabs',
+      referenceRange: range, secret: 'el-key', signal: new AbortController().signal
+    });
+    expect(result.cached).toBe(false);
+    expect(result.voice.voiceId).toBe('el_fresh_matrix');
+    expect(calls.length).toBeGreaterThan(0);
+  }, 90_000);
+
+  it('a multi-window request never matches a partial record missing windows (matrix, other side)', async () => {
+    // partial-sc (sourceClass:'raw', NO windows) is new-shaped, so it survives the class check
+    // for a raw multi-window request — but windowsMatch fails on its absent windows. Use a
+    // window set unique to this test so no other record can hit.
+    const uniqueWindows = [{ clipId: 'clip_001', start: 3, end: 13 }];
+    const calls: string[] = [];
+    (globalThis as any).fetch = vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ voice_id: 'el_fresh_matrix_mw' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const result = await cloneCleanClip(workspace, {
+      ...settingsInput, projectId: 'proj-matrix', scope: 'project', provider: 'elevenlabs',
+      multiWindow: { windows: uniqueWindows, sourceClass: 'raw' },
+      secret: 'el-key', signal: new AbortController().signal
+    });
+    expect(result.cached).toBe(false);
+    expect(result.voice.voiceId).toBe('el_fresh_matrix_mw');
+    expect(calls.length).toBeGreaterThan(0);
   }, 90_000);
 });

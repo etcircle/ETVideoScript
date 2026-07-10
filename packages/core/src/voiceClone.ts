@@ -13,6 +13,10 @@ import {
   type SettingsPathsInput
 } from './providerSettings';
 import type { TranscriptWords } from './schemas';
+import type { ManifestV3 } from './manifest/schema';
+import { isStudioCleanupFresh } from './channelFixScope';
+import { sliceAudioWindow, trimPausesAndSilence, loudnormClip } from './audioClip';
+import { trackPitch, YIN_FRAME_SAMPLES, YIN_SAMPLE_RATE } from './pitch';
 
 // Locale-independent string compare. The selector MUST be deterministic across
 // machines/locales (it is an explicit gate criterion), and String.localeCompare
@@ -32,8 +36,6 @@ function windowOverlaps(
 ): boolean {
   return c.clipId === ex.clipId && c.start < ex.end && c.end > ex.start;
 }
-import { sliceAudioWindow, trimPausesAndSilence, loudnormClip } from './audioClip';
-import { trackPitch, YIN_FRAME_SAMPLES, YIN_SAMPLE_RATE } from './pitch';
 
 // ── Clone-provider dispatch ──────────────────────────────────────────────────────
 // Mirrors the CLONE_PROVIDERS table in apps/local-api settingsRoutes.ts so cloneCleanClip
@@ -143,21 +145,29 @@ export interface CloneCleanClipParams {
   // When present AND the provider's maxSamples > 1, cloneCleanClip preps EACH window
   // separately (slice → pause retain-cap 1.5s → clone-band loudnorm −20/−3) and uploads them
   // as SEPARATE samples in one clone call. The caller (S1b route) resolves these windows via
-  // selectCleanWindows and gates cleanup freshness via isStudioCleanupFresh; core just preps,
-  // uploads, and records the multi-window cache identity. Ignored for a maxSamples===1 provider
-  // (Cartesia keeps byte-identical single-window behavior). `referenceRange` and `multiWindow`
-  // are mutually exclusive — pass one path or the other.
+  // selectCleanWindows; CORE enforces the cleaned-source contract itself (Hermes S1a review
+  // P1): freshness, cacheKey identity, artifact existence, and single-base-clip scoping are
+  // all verified here BEFORE any cache read or remote call — the primitive is safe standalone,
+  // not "safe if the route behaves". Ignored for a maxSamples===1 provider (Cartesia keeps
+  // byte-identical single-window behavior). `referenceRange` and `multiWindow` are mutually
+  // exclusive when multi-window mode engages.
   multiWindow?: {
     // Asset-axis windows, canonical ascending-start order (as selectCleanWindows returns them).
+    // ALL windows must share one clipId — window timestamps are never reinterpreted against
+    // another clip's audio.
     windows: { clipId: string; start: number; end: number }[];
-    // 'raw' → prep from the 48k reference; 'cleaned' → prep from `cleanedAssetPath`.
+    // 'raw' → prep from the 48k reference; 'cleaned' → prep from the manifest's FRESH cleaned bed.
     sourceClass: 'raw' | 'cleaned';
     // studioCleanup.cacheKey — REQUIRED for 'cleaned' (cache identity pin), forbidden for 'raw'.
+    // Core cross-checks it against manifest.studioCleanup.cacheKey; a mismatch is a hard error,
+    // not a silent cache-key drift.
     cleanupIdentity?: string;
-    // Workspace-relative path to the FRESH cleaned bed (studioCleanup.assetPath). REQUIRED for
-    // 'cleaned'. The caller must have already confirmed freshness (isStudioCleanupFresh) and
-    // that the artifact exists — core re-checks existence but not the manifest freshness rule.
-    cleanedAssetPath?: string;
+    // REQUIRED for 'cleaned': the manifest state core verifies the cleaned source against —
+    // studioCleanup (status/cacheKey/assetPath), audioChannelFix (freshness fingerprint via
+    // isStudioCleanupFresh), and tracks+assets (the windows' clip must belong to the base
+    // recording the cleanup describes: asset path input/source.mp4). Pass the project's live
+    // ManifestV3 (it is structurally assignable). Ignored for 'raw'.
+    manifest?: Pick<ManifestV3, 'studioCleanup' | 'audioChannelFix' | 'tracks' | 'assets'>;
   };
 }
 
@@ -423,6 +433,20 @@ export class InsufficientCleanWindowsError extends Error {
   }
 }
 
+// Typed error for every violation of the cleaned-source contract in cloneCleanClip's
+// multi-window mode (stale/absent/misdescribed cleanup, cacheKey mismatch, wrong clip).
+// Distinct from InsufficientCleanWindowsError: that one means "the audio doesn't have enough
+// clean material" (caller may fall back to single-window); this one means "the cleaned bed you
+// asked to clone from is not trustworthy right now" (caller must re-run cleanup, fall back to
+// raw EXPLICITLY, or surface the state to the user — never silently proceed).
+export class CleanedSourceUnavailableError extends Error {
+  readonly code = 'cleaned-source-unavailable';
+  constructor(detail: string) {
+    super(`cleaned-source-unavailable: ${detail}`);
+    this.name = 'CleanedSourceUnavailableError';
+  }
+}
+
 export interface CleanWindow {
   clipId: string;
   start: number;
@@ -486,22 +510,35 @@ function pcmWindow(pcm: Float32Array, sampleRate: number, startSec: number, endS
 }
 
 // Whole-recording target register: voiced-median F0 over the union of transcript-covered
-// spans (speech frames of this source class), NOT the whole buffer — silence/music between
-// words must not drag the register. We concatenate the covered spans' PCM and run one YIN
-// pass over the result (frame boundaries at seams add negligible noise vs. per-span medians).
+// WORD spans (speech frames of this source class), NOT the whole buffer and NOT run spans —
+// a run span (first-word→last-word) would include the ≤maxInternalGap inter-word gaps, and
+// voiced non-speech in those gaps (music bed, hum, a second speaker's bleed) would pollute
+// the median. Per-word slicing keeps only frames the transcript actually attributes to
+// speech. Overlapping/adjacent word spans are merged first so no sample is double-counted
+// (double-counting would bias the median toward whatever repeats). We concatenate the merged
+// spans' PCM and run one YIN pass over the result; frame boundaries at the concat seams add
+// a little noise per seam (a frame can straddle two words), which is acceptable for a MEDIAN
+// over thousands of frames — it cannot drag the register the way in-gap voiced content can.
 function computeTargetRegister(
   words: TranscriptWords['words'],
   clipId: string,
   pcm: Float32Array,
-  sampleRate: number,
-  maxInternalGapSec: number
+  sampleRate: number
 ): number | null {
   const clipWords = words.filter((w) => w.clipId === clipId).sort((a, b) => a.start - b.start || cmpStr(a.id, b.id));
-  const runs = splitRuns(clipWords, maxInternalGapSec);
+  // Merge overlapping/adjacent word spans (STT words can overlap slightly at boundaries).
+  const merged: { start: number; end: number }[] = [];
+  for (const w of clipWords) {
+    const last = merged[merged.length - 1];
+    if (last && w.start <= last.end) {
+      if (w.end > last.end) last.end = w.end;
+    } else {
+      merged.push({ start: w.start, end: w.end });
+    }
+  }
   const chunks: Float32Array[] = [];
-  for (const run of runs) {
-    if (run.length === 0) continue;
-    chunks.push(pcmWindow(pcm, sampleRate, run[0]!.start, run[run.length - 1]!.end));
+  for (const span of merged) {
+    chunks.push(pcmWindow(pcm, sampleRate, span.start, span.end));
   }
   const total = chunks.reduce((s, c) => s + c.length, 0);
   if (total < YIN_FRAME_SAMPLES) return null;
@@ -542,10 +579,16 @@ export function selectCleanWindows(params: SelectCleanWindowsParams): SelectClea
       'transcript-timing-not-exact: selectCleanWindows requires exact word timing; mock and approximate modes produce synthetic gaps that make window selection unsafe.'
     );
   }
+  // Tuning sanity: a cap below the aggregate floor is unsatisfiable by construction — the
+  // chosen set could never reach minUsableAggregateSec. Fail loudly as a caller bug instead
+  // of always throwing InsufficientCleanWindowsError (which reads as "your audio is bad").
+  if (maxTotalSec < minUsableAggregateSec) {
+    throw new Error(`selectCleanWindows: maxTotalSec (${maxTotalSec}) must be >= minUsableAggregateSec (${minUsableAggregateSec}) — the cap would make the aggregate floor unreachable.`);
+  }
 
   const targetRegisterHz = params.targetRegisterHz !== undefined
     ? params.targetRegisterHz
-    : computeTargetRegister(words.words, clipId, pcm16k, sampleRate, maxInternalGapSec);
+    : computeTargetRegister(words.words, clipId, pcm16k, sampleRate);
 
   const clipWords = words.words
     .filter((w) => w.clipId === clipId)
@@ -708,13 +751,16 @@ function findCachedVoice(
     if (v.cloneScope !== scope) continue;
     if (v.originProjectId !== projectId) continue;
 
-    // Class-symmetric matching on the multi-window identity. A record is MULTI-WINDOW-shaped
-    // iff it carries `windows`; a request is multi-window iff `multiWindow` is present. Never
-    // match across classes — a legacy record and a multi-window request describe different
-    // prepared audio even when their ranges coincide.
-    const recIsMultiWindow = !!v.windows;
+    // Class-symmetric matching on the multi-window identity. A record is NEW-shaped iff it
+    // carries ANY of sourceClass/cleanupIdentity/windows (a hand-edited or partially-written
+    // record with only some of the trio is still not legacy — treating it as legacy would let
+    // a legacy request reuse a clone whose prepared audio it knows nothing about); legacy =
+    // none of the three. A request is multi-window iff `multiWindow` is present. Never match
+    // across classes — a legacy record and a multi-window request describe different prepared
+    // audio even when their ranges coincide.
+    const recIsNewShaped = v.sourceClass !== undefined || v.cleanupIdentity !== undefined || v.windows !== undefined;
     const reqIsMultiWindow = !!multiWindow;
-    if (recIsMultiWindow !== reqIsMultiWindow) continue;
+    if (recIsNewShaped !== reqIsMultiWindow) continue;
 
     if (reqIsMultiWindow) {
       // MULTI-WINDOW class: sourceClass + cleanupIdentity + ordered windows must ALL match.
@@ -729,9 +775,9 @@ function findCachedVoice(
       return v;
     }
 
-    // LEGACY single-window class: sourceAudioRange only (unchanged semantics). A record that
-    // carries sourceClass but no windows is not legacy-shaped and is skipped by the class check
-    // above; here `v.windows` is always absent.
+    // LEGACY single-window class: sourceAudioRange only (unchanged semantics). Reaching here
+    // means the record carries NONE of sourceClass/cleanupIdentity/windows (any partial
+    // new-shape was skipped by the class check above).
     const sar = v.sourceAudioRange;
     if (!sar) continue;
     if (sar.clipId !== range.clipId) continue;
@@ -963,15 +1009,23 @@ async function cloneMultiWindow(
   }
 ): Promise<CloneCleanClipResult> {
   const { provider, cloneCfg, accountRef, settingsInput, multiWindow } = ctx;
-  const { windows, sourceClass, cleanupIdentity, cleanedAssetPath } = multiWindow;
+  const { windows, sourceClass, cleanupIdentity, manifest } = multiWindow;
 
-  // Validate the request shape up front (before any extraction / remote call).
+  // Validate the request shape up front (before any cache read / extraction / remote call).
   if (windows.length === 0) throw new Error('cloneCleanClip: multiWindow.windows must be non-empty.');
   if (windows.length > cloneCfg.maxSamples) throw new Error(`cloneCleanClip: ${windows.length} windows exceeds provider ${provider}'s ${cloneCfg.maxSamples}-sample budget.`);
   for (const w of windows) {
     if (!Number.isFinite(w.start) || !Number.isFinite(w.end)) throw new Error('cloneCleanClip: multiWindow window start/end must be finite numbers.');
     if (w.start < 0 || w.end <= w.start) throw new Error(`cloneCleanClip: multiWindow window must satisfy 0 <= start < end (got ${w.start}..${w.end}).`);
     if (w.clipId.length > 128) throw new Error(`cloneCleanClip: window clipId "${w.clipId}" exceeds the 128-character limit.`);
+  }
+  // ONE clip per request (Hermes S1a P1): every window's timestamps are asset-axis coordinates
+  // of windows[0]'s clip. A mixed set would slice clip A's timestamps out of clip B's audio —
+  // timestamp reinterpretation across clips is never allowed.
+  for (const w of windows) {
+    if (w.clipId !== windows[0]!.clipId) {
+      throw new Error(`cloneCleanClip: all multiWindow windows must be on ONE clip (got "${w.clipId}" alongside "${windows[0]!.clipId}") — window timestamps are never reinterpreted against another clip's audio.`);
+    }
   }
   // Windows must already be in canonical ascending-start order (as selectCleanWindows returns
   // them) — the cache identity compares positionally, so an out-of-order request would never
@@ -980,15 +1034,61 @@ async function cloneMultiWindow(
   for (let i = 1; i < windows.length; i++) {
     if (windows[i]!.start < windows[i - 1]!.start) throw new Error('cloneCleanClip: multiWindow.windows must be in ascending-start order.');
   }
-  // sourceClass ↔ cleanup coupling: 'cleaned' REQUIRES both cleanupIdentity and cleanedAssetPath;
-  // 'raw' must carry neither (a cleanupIdentity on a raw record would corrupt the cache identity).
+  // sourceClass ↔ cleanup coupling: 'raw' must not carry cleaned-only fields (a cleanupIdentity
+  // on a raw record would corrupt the cache identity).
+  if (sourceClass === 'raw') {
+    if (cleanupIdentity) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity must be omitted when sourceClass is "raw".');
+  }
+
+  // ── Cleaned-source contract, enforced by CORE (Hermes S1a P1) ────────────────────────────
+  // The primitive must be safe standalone: a caller-supplied cleanupIdentity or artifact path
+  // is never trusted. Verify the manifest's cleanup state HERE, before the cache lookup — a
+  // stale/absent cleanup must not even return a cache hit (the hit would launder a clone whose
+  // bed no longer reflects the recording's current state). Every violation is a typed
+  // CleanedSourceUnavailableError; raw sourceClass is unaffected by this block.
+  let cleanedAssetRel: string | undefined;
   if (sourceClass === 'cleaned') {
     if (!cleanupIdentity) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity is required when sourceClass is "cleaned".');
-    if (!cleanedAssetPath) throw new Error('cloneCleanClip: multiWindow.cleanedAssetPath is required when sourceClass is "cleaned".');
     if (cleanupIdentity.length > 200) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity exceeds the 200-character limit.');
-  } else {
-    if (cleanupIdentity) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity must be omitted when sourceClass is "raw".');
-    if (cleanedAssetPath) throw new Error('cloneCleanClip: multiWindow.cleanedAssetPath must be omitted when sourceClass is "raw".');
+    if (!manifest) throw new Error('cloneCleanClip: multiWindow.manifest is required when sourceClass is "cleaned" — core verifies cleanup freshness itself.');
+    const cleanup = manifest.studioCleanup;
+    // (a) approved + (b) fresh — the SAME rule render uses (shared helper, not a re-derivation).
+    if (!cleanup || cleanup.status !== 'approved') {
+      throw new CleanedSourceUnavailableError(`studioCleanup is ${cleanup ? `status "${cleanup.status}"` : 'absent'} — an approved cleanup is required to clone from the cleaned source.`);
+    }
+    if (!isStudioCleanupFresh(manifest)) {
+      throw new CleanedSourceUnavailableError('studioCleanup is STALE (its audioChannelFixFingerprint no longer matches the current channel-fix state) — re-run studio cleanup or clone from raw explicitly.');
+    }
+    // (c) the request's cache identity must BE the manifest's cleanup identity. A mismatch means
+    // the caller resolved windows against one cleanup generation and is cloning under another.
+    if (cleanupIdentity !== cleanup.cacheKey) {
+      throw new CleanedSourceUnavailableError(`cleanupIdentity "${cleanupIdentity}" does not match the manifest's studioCleanup.cacheKey "${cleanup.cacheKey}" — the windows were selected against a different cleanup generation.`);
+    }
+    // (d) the artifact path must be the immutable content-addressed location for THIS cacheKey
+    // and must exist on disk. A hand-edited assetPath pointing elsewhere is not trusted.
+    const expectedRel = `assets/studio-clean/${cleanup.cacheKey}.wav`;
+    if (cleanup.assetPath !== expectedRel) {
+      throw new CleanedSourceUnavailableError(`studioCleanup.assetPath "${cleanup.assetPath}" is not the expected content-addressed path "${expectedRel}".`);
+    }
+    const cleanedAbs = assertInside(workspace, expectedRel);
+    if (!existsSync(cleanedAbs)) {
+      throw new CleanedSourceUnavailableError(`cleaned artifact missing at ${expectedRel} — regenerate studio cleanup or clone from raw explicitly.`);
+    }
+    // The windows' clip must belong to the base recording the cleanup describes: studioCleanup
+    // covers ONLY input/source.mp4's audio (same literal-path rule as render's scope guard).
+    const clipId = windows[0]!.clipId;
+    const clip = (manifest.tracks ?? [])
+      .filter((t) => t.kind === 'video')
+      .flatMap((t) => t.clips ?? [])
+      .find((c) => c.clipId === clipId);
+    if (!clip) {
+      throw new CleanedSourceUnavailableError(`clip "${clipId}" not found on any video track — cleaned windows must target the base recording's clip.`);
+    }
+    const asset = (manifest.assets ?? []).find((a) => a.assetId === clip.assetId);
+    if (!asset || asset.path !== 'input/source.mp4') {
+      throw new CleanedSourceUnavailableError(`clip "${clipId}" resolves to asset path "${asset?.path ?? '(unknown)'}" — studioCleanup describes only input/source.mp4, so cleaned windows must be on that recording's clip.`);
+    }
+    cleanedAssetRel = expectedRel;
   }
 
   // The scope is 'project' for a multi-window clone (it trains from the whole recording's
@@ -1020,14 +1120,14 @@ async function cloneMultiWindow(
   if (params.projectId !== undefined && params.projectId.length > 200) throw new Error('cloneCleanClip: projectId exceeds the 200-character originProjectId limit.');
 
   // Resolve the base audio each window is sliced from. 'raw' → the 48k reference derivative of
-  // the base clip; 'cleaned' → the fresh cleaned WAV (caller-confirmed fresh). Both are sliced on
-  // the ASSET axis — the cleaned bed is length-preserving (EL Isolator returns a same-duration
-  // file), so window timestamps map 1:1.
+  // the base clip; 'cleaned' → the CORE-VERIFIED fresh cleaned WAV (contract block above: fresh,
+  // cacheKey-matched, content-addressed path, exists). Both are sliced on the ASSET axis — the
+  // cleaned bed is length-preserving (EL Isolator returns a same-duration file), so window
+  // timestamps map 1:1.
   let baseAudioAbs: string;
   const refRel = await extractFullBandReference(workspace, spanClipId);
   if (sourceClass === 'cleaned') {
-    baseAudioAbs = assertInside(workspace, cleanedAssetPath!);
-    if (!existsSync(baseAudioAbs)) throw new Error(`cloneCleanClip: cleaned asset not found at ${cleanedAssetPath} — cleanup artifact missing (regenerate studio cleanup or use sourceClass 'raw').`);
+    baseAudioAbs = assertInside(workspace, cleanedAssetRel!);
   } else {
     baseAudioAbs = assertInside(workspace, refRel);
     // Hardened guard: never clone from the 16k STT copy (same as single-window path).

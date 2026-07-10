@@ -14,7 +14,13 @@ import type { ManifestV3 } from './manifest/schema';
  * project. Extraction/detach call sites that operate on an arbitrary clip's
  * asset must go through this instead of trusting the fix unconditionally.
  */
-export function resolveChannelFixForAsset(manifest: ManifestV3, assetPath: string): 'left' | 'right' | undefined {
+// Structural subsets of ManifestV3 — the predicates below only READ these fields, and the
+// multi-window clone path (voiceClone.ts) verifies cleanup freshness from a caller-supplied
+// subset rather than a full manifest. A full ManifestV3 stays assignable everywhere.
+export type ChannelFixState = Pick<ManifestV3, 'audioChannelFix'>;
+export type StudioCleanupState = Pick<ManifestV3, 'studioCleanup' | 'audioChannelFix'>;
+
+export function resolveChannelFixForAsset(manifest: ChannelFixState, assetPath: string): 'left' | 'right' | undefined {
   if (manifest.audioChannelFix?.status !== 'approved') return undefined;
   return assetPath === 'input/source.mp4' ? manifest.audioChannelFix.sourceChannel : undefined;
 }
@@ -25,7 +31,7 @@ export function channelFixFingerprint(sourceChannel: 'left' | 'right' | undefine
 }
 
 /** Fingerprint of the base recording's channel-fix state as it stands in `manifest` right now. */
-export function sourceChannelFixFingerprint(manifest: ManifestV3): string {
+export function sourceChannelFixFingerprint(manifest: ChannelFixState): string {
   return channelFixFingerprint(resolveChannelFixForAsset(manifest, 'input/source.mp4'));
 }
 
@@ -43,7 +49,7 @@ export function sourceChannelFixFingerprint(manifest: ManifestV3): string {
  * channel-fix history at all (the common case, and every pre-fingerprint manifest) is
  * never stale on this axis. Byte-identical to render/plan.ts:236-239.
  */
-export function isStudioCleanupFresh(manifest: ManifestV3): boolean {
+export function isStudioCleanupFresh(manifest: StudioCleanupState): boolean {
   const cleanup = manifest.studioCleanup;
   if (!cleanup || cleanup.status !== 'approved') return false;
   // Stale iff a channel-fix record exists AND the cleanup's recorded fingerprint no
