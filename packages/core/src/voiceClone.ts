@@ -33,6 +33,7 @@ function windowOverlaps(
   return c.clipId === ex.clipId && c.start < ex.end && c.end > ex.start;
 }
 import { sliceAudioWindow, trimPausesAndSilence, loudnormClip } from './audioClip';
+import { trackPitch, YIN_FRAME_SAMPLES, YIN_SAMPLE_RATE } from './pitch';
 
 // ── Clone-provider dispatch ──────────────────────────────────────────────────────
 // Mirrors the CLONE_PROVIDERS table in apps/local-api settingsRoutes.ts so cloneCleanClip
@@ -138,6 +139,26 @@ export interface CloneCleanClipParams {
   secret: string;
   baseUrl?: string;
   signal: AbortSignal;
+  // ── Multi-window mode (S1a) ──
+  // When present AND the provider's maxSamples > 1, cloneCleanClip preps EACH window
+  // separately (slice → pause retain-cap 1.5s → clone-band loudnorm −20/−3) and uploads them
+  // as SEPARATE samples in one clone call. The caller (S1b route) resolves these windows via
+  // selectCleanWindows and gates cleanup freshness via isStudioCleanupFresh; core just preps,
+  // uploads, and records the multi-window cache identity. Ignored for a maxSamples===1 provider
+  // (Cartesia keeps byte-identical single-window behavior). `referenceRange` and `multiWindow`
+  // are mutually exclusive — pass one path or the other.
+  multiWindow?: {
+    // Asset-axis windows, canonical ascending-start order (as selectCleanWindows returns them).
+    windows: { clipId: string; start: number; end: number }[];
+    // 'raw' → prep from the 48k reference; 'cleaned' → prep from `cleanedAssetPath`.
+    sourceClass: 'raw' | 'cleaned';
+    // studioCleanup.cacheKey — REQUIRED for 'cleaned' (cache identity pin), forbidden for 'raw'.
+    cleanupIdentity?: string;
+    // Workspace-relative path to the FRESH cleaned bed (studioCleanup.assetPath). REQUIRED for
+    // 'cleaned'. The caller must have already confirmed freshness (isStudioCleanupFresh) and
+    // that the artifact exists — core re-checks existence but not the manifest freshness rule.
+    cleanedAssetPath?: string;
+  };
 }
 
 export interface CloneCleanClipResult {
@@ -145,6 +166,8 @@ export interface CloneCleanClipResult {
   selection: CleanClipSelection;
   cached: boolean;
   referencePath: string;
+  /** How many samples were uploaded (1 for single-window / Cartesia; N for a multi-window EL clone). */
+  sampleCount: number;
 }
 
 // ── Internal candidate type ────────────────────────────────────────────────────
@@ -370,7 +393,280 @@ export function selectCleanClip(params: SelectCleanClipParams): CleanClipSelecti
   };
 }
 
+// ── Multi-window selection (S1a) ─────────────────────────────────────────────────
+// selectCleanWindows fills a maxSamples>1 provider's sample budget with several ~10s
+// clean windows from ONE eligible clip, register-consistent with the whole-recording
+// target. It is PURE (no fs/ffmpeg): the caller supplies the eligible clip's 16k mono
+// PCM on the asset axis, and register/voicing come from the TS YIN port (pitch.ts).
+// selectCleanClip stays the single-window primitive; this is its multi-sample sibling.
+
+const WINDOW_SEC = 10; // ~10s target window (the plan's cadence)
+const MIN_USABLE_AGG_SEC = 30; // must reach ≥30s of usable material or fail honestly
+const MAX_TOTAL_SEC = 90; // cap total uploaded material at ≈90s
+const MIN_VOICED_COVERAGE = 0.4; // usability floor: ≥40% voiced frames
+const MIN_MEAN_CONFIDENCE = 0.6; // cleanliness pass floor (mean word confidence)
+const REGISTER_BAND_FRAC = 0.03; // ±3% register band; out-of-band DEMOTES (not excludes)
+
+// Typed error so the caller can distinguish "not enough usable clean audio for the
+// multi-window path" from a programming error and fall back to the legacy single-window
+// path (recording that fallback in the cache record). Named per the plan's "error naming
+// the shortfall" requirement.
+export class InsufficientCleanWindowsError extends Error {
+  readonly code = 'insufficient-clean-windows';
+  readonly usableSec: number;
+  readonly requiredSec: number;
+  constructor(usableSec: number, requiredSec: number, detail: string) {
+    super(`insufficient-clean-windows: only ${usableSec.toFixed(1)}s of usable clean material (need >= ${requiredSec.toFixed(1)}s) — ${detail}`);
+    this.name = 'InsufficientCleanWindowsError';
+    this.usableSec = usableSec;
+    this.requiredSec = requiredSec;
+  }
+}
+
+export interface CleanWindow {
+  clipId: string;
+  start: number;
+  end: number;
+  spanSec: number;
+  meanConfidence: number;
+  maxInternalGap: number;
+  /** voiced-frame fraction over this window's PCM (YIN). */
+  voicedCoverage: number;
+  /** voiced-median F0 (register) over this window, or null when no frame is voiced. */
+  registerHz: number | null;
+  /** |registerHz - target| / target, or null when either register is unavailable. */
+  registerDeltaFrac: number | null;
+  /** true iff within the ±REGISTER_BAND_FRAC band of the target register. */
+  inBand: boolean;
+  /** true iff ≥MIN_VOICED_COVERAGE voiced AND cleanliness pass — only usable windows upload. */
+  usable: boolean;
+}
+
+export interface SelectCleanWindowsParams {
+  words: TranscriptWords;
+  /** The single ELIGIBLE clip (cleaned-source scoping restricts this to the base clip). */
+  clipId: string;
+  /** 16k mono PCM (Float32 [-1,1]) of the eligible clip on the ASSET axis (t=0 at sample 0). */
+  pcm16k: Float32Array;
+  sampleRate?: number;
+  /**
+   * Whole-recording target register (voiced-median F0 over transcript-covered speech frames
+   * of the SAME source class). When omitted, computed here from `pcm16k` over the union of
+   * transcript-covered spans (never silence/music). Pass null to skip register scoring
+   * entirely (every window treated in-band) — used only when the recording has no voiced
+   * material to anchor on.
+   */
+  targetRegisterHz?: number | null;
+  // tuning — locked defaults exposed for tests
+  windowSec?: number;
+  minUsableAggregateSec?: number;
+  maxTotalSec?: number;
+  minVoicedCoverage?: number;
+  minMeanConfidence?: number;
+  registerBandFrac?: number;
+  maxInternalGapSec?: number;
+}
+
+export interface SelectCleanWindowsResult {
+  /** Usable windows in canonical ascending-start order, capped at ≈maxTotalSec aggregate. */
+  windows: CleanWindow[];
+  /** Sum of the returned windows' spans. */
+  totalSec: number;
+  /** The target register used for scoring (echoed for provenance/tests). */
+  targetRegisterHz: number | null;
+}
+
+// Slice the eligible clip's 16k PCM for [startSec, endSec) on the asset axis. Bounds are
+// clamped into the buffer so a window ending past the decoded PCM tail still yields the
+// frames it has (the transcript can legitimately outrun the exact sample count by a hair).
+function pcmWindow(pcm: Float32Array, sampleRate: number, startSec: number, endSec: number): Float32Array {
+  const from = Math.max(0, Math.floor(startSec * sampleRate));
+  const to = Math.min(pcm.length, Math.ceil(endSec * sampleRate));
+  return from < to ? pcm.subarray(from, to) : new Float32Array(0);
+}
+
+// Whole-recording target register: voiced-median F0 over the union of transcript-covered
+// spans (speech frames of this source class), NOT the whole buffer — silence/music between
+// words must not drag the register. We concatenate the covered spans' PCM and run one YIN
+// pass over the result (frame boundaries at seams add negligible noise vs. per-span medians).
+function computeTargetRegister(
+  words: TranscriptWords['words'],
+  clipId: string,
+  pcm: Float32Array,
+  sampleRate: number,
+  maxInternalGapSec: number
+): number | null {
+  const clipWords = words.filter((w) => w.clipId === clipId).sort((a, b) => a.start - b.start || cmpStr(a.id, b.id));
+  const runs = splitRuns(clipWords, maxInternalGapSec);
+  const chunks: Float32Array[] = [];
+  for (const run of runs) {
+    if (run.length === 0) continue;
+    chunks.push(pcmWindow(pcm, sampleRate, run[0]!.start, run[run.length - 1]!.end));
+  }
+  const total = chunks.reduce((s, c) => s + c.length, 0);
+  if (total < YIN_FRAME_SAMPLES) return null;
+  const covered = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { covered.set(c, off); off += c.length; }
+  return trackPitch(covered, sampleRate).voicedMedianF0Hz;
+}
+
+/**
+ * Enumerate ~windowSec windows over the eligible clip, score each by cleanliness +
+ * register-closeness, and return the usable set (≥minVoicedCoverage voiced AND a cleanliness
+ * pass) in canonical ascending-start order, capped at ≈maxTotalSec. Throws
+ * InsufficientCleanWindowsError when the usable aggregate falls short of minUsableAggregateSec.
+ *
+ * PURE and deterministic (YIN + transcript only; no fs/ffmpeg/Date/RNG). Windows are cut at
+ * run boundaries (gaps > maxInternalGapSec) so an auto-selected window never straddles a long
+ * pause — the same consistency-over-diversity policy selectCleanClip uses; natural breaths up
+ * to CLONE_PREP_MAX_PAUSE_SEC are retained at PREP time, not selection.
+ */
+export function selectCleanWindows(params: SelectCleanWindowsParams): SelectCleanWindowsResult {
+  const {
+    words,
+    clipId,
+    pcm16k,
+    sampleRate = YIN_SAMPLE_RATE,
+    windowSec = WINDOW_SEC,
+    minUsableAggregateSec = MIN_USABLE_AGG_SEC,
+    maxTotalSec = MAX_TOTAL_SEC,
+    minVoicedCoverage = MIN_VOICED_COVERAGE,
+    minMeanConfidence = MIN_MEAN_CONFIDENCE,
+    registerBandFrac = REGISTER_BAND_FRAC,
+    maxInternalGapSec = MAX_INTERNAL_GAP
+  } = params;
+
+  if (words.provider.timing !== 'exact') {
+    throw new Error(
+      'transcript-timing-not-exact: selectCleanWindows requires exact word timing; mock and approximate modes produce synthetic gaps that make window selection unsafe.'
+    );
+  }
+
+  const targetRegisterHz = params.targetRegisterHz !== undefined
+    ? params.targetRegisterHz
+    : computeTargetRegister(words.words, clipId, pcm16k, sampleRate, maxInternalGapSec);
+
+  const clipWords = words.words
+    .filter((w) => w.clipId === clipId)
+    .sort((a, b) => a.start - b.start || cmpStr(a.id, b.id));
+  const runs = splitRuns(clipWords, maxInternalGapSec);
+
+  // Tile each run into consecutive non-overlapping ~windowSec windows. Greedy from the run
+  // start: accumulate words until the span would exceed windowSec, close the window, start
+  // the next at the following word. Windows never straddle a run boundary (no long pause
+  // inside). A trailing sub-windowSec remainder still becomes a window — the usability floor,
+  // not a hard length cut, decides whether it is uploaded.
+  const raw: CleanWindow[] = [];
+  for (const run of runs) {
+    let i = 0;
+    while (i < run.length) {
+      let j = i;
+      while (j + 1 < run.length && run[j + 1]!.end - run[i]!.start <= windowSec) j++;
+      const slice = run.slice(i, j + 1);
+      const start = slice[0]!.start;
+      const end = slice[slice.length - 1]!.end;
+      let maxGap = 0;
+      for (let k = 1; k < slice.length; k++) {
+        const gap = slice[k]!.start - slice[k - 1]!.end;
+        if (gap > maxGap) maxGap = gap;
+      }
+      const track = trackPitch(pcmWindow(pcm16k, sampleRate, start, end), sampleRate);
+      const registerHz = track.voicedMedianF0Hz;
+      const registerDeltaFrac = targetRegisterHz && registerHz !== null
+        ? Math.abs(registerHz - targetRegisterHz) / targetRegisterHz
+        : null;
+      // In-band when there's no target to compare against (null delta ⇒ treat as in-band so
+      // register scoring is inert), or when within ±registerBandFrac.
+      const inBand = registerDeltaFrac === null || registerDeltaFrac <= registerBandFrac;
+      const meanConfidence = mean(slice.map((w) => w.confidence));
+      const usable = track.voicedCoverage >= minVoicedCoverage && meanConfidence >= minMeanConfidence;
+      raw.push({
+        clipId, start, end, spanSec: end - start,
+        meanConfidence, maxInternalGap: maxGap,
+        voicedCoverage: track.voicedCoverage, registerHz, registerDeltaFrac, inBand, usable
+      });
+      i = j + 1;
+    }
+  }
+
+  // Only usable windows are ever uploaded. Silence/low-confidence windows are never used to
+  // pad toward the duration target (the plan: "silence is never uploaded to fill duration").
+  const usableWindows = raw.filter((w) => w.usable);
+  const usableAgg = usableWindows.reduce((s, w) => s + w.spanSec, 0);
+  if (usableAgg < minUsableAggregateSec) {
+    throw new InsufficientCleanWindowsError(
+      usableAgg, minUsableAggregateSec,
+      `${usableWindows.length} usable window(s) on clip ${clipId} (of ${raw.length} enumerated); need continuous clean speech ≥${minVoicedCoverage * 100}% voiced and ≥${minMeanConfidence} mean confidence`
+    );
+  }
+
+  // Rank (best first) BEFORE the cap so the ≈maxTotalSec budget keeps the strongest windows:
+  //   1. in-band before out-of-band (±3% band DEMOTES, does not exclude)
+  //   2. higher voiced coverage
+  //   3. closer register (smaller delta; null delta sorts last among equals)
+  //   4. earlier start (stable, deterministic)
+  const ranked = [...usableWindows].sort((a, b) => {
+    if (a.inBand !== b.inBand) return a.inBand ? -1 : 1;
+    const cov = b.voicedCoverage - a.voicedCoverage;
+    if (cov !== 0) return cov;
+    const da = a.registerDeltaFrac ?? Number.POSITIVE_INFINITY;
+    const db = b.registerDeltaFrac ?? Number.POSITIVE_INFINITY;
+    if (da !== db) return da - db;
+    if (a.start !== b.start) return a.start - b.start;
+    return cmpStr(a.clipId, b.clipId);
+  });
+
+  // Take from the ranked list until adding the next window would exceed the ≈maxTotalSec cap.
+  // A window longer than the whole cap (unusual) is still taken alone so we never return empty
+  // when usable material exists.
+  const chosen: CleanWindow[] = [];
+  let total = 0;
+  for (const w of ranked) {
+    if (chosen.length > 0 && total + w.spanSec > maxTotalSec) continue;
+    chosen.push(w);
+    total += w.spanSec;
+    if (total >= maxTotalSec) break;
+  }
+
+  // Canonical OUTPUT ordering: ascending start (ranking governed selection, not order).
+  chosen.sort((a, b) => a.start - b.start || cmpStr(a.clipId, b.clipId));
+  return { windows: chosen, totalSec: chosen.reduce((s, w) => s + w.spanSec, 0), targetRegisterHz };
+}
+
 // ── Cache check ────────────────────────────────────────────────────────────────
+
+// A cache request is one of two structurally-distinct CLASSES, matched symmetrically (the
+// same philosophy as accountRef tag classes): a LEGACY single-window request identifies its
+// clone by sourceAudioRange only; a MULTI-WINDOW request identifies it by sourceClass +
+// ordered windows (+ cleanupIdentity when cleaned). A legacy record never satisfies a
+// multi-window request and vice versa — even if the ranges happen to coincide — because the
+// prepared audio (single raw window vs. several cleaned windows uploaded as separate samples)
+// is a different clone entirely.
+interface MultiWindowIdentity {
+  sourceClass: 'raw' | 'cleaned';
+  /** Present only for sourceClass:'cleaned' (studioCleanup.cacheKey). */
+  cleanupIdentity?: string;
+  /** Canonical ascending-start order; compared position-by-position within CACHE_EPSILON. */
+  windows: { clipId: string; start: number; end: number }[];
+}
+
+// True iff a record's stored windows match the request's windows exactly: same count, same
+// clipId per position, and start/end within CACHE_EPSILON. Order matters, but both sides are
+// produced/stored in canonical ascending-start order so a positional compare is exact.
+function windowsMatch(
+  recWindows: { clipId: string; start: number; end: number }[] | undefined,
+  reqWindows: { clipId: string; start: number; end: number }[]
+): boolean {
+  if (!recWindows || recWindows.length !== reqWindows.length) return false;
+  for (let i = 0; i < reqWindows.length; i++) {
+    const a = recWindows[i]!;
+    const b = reqWindows[i]!;
+    if (a.clipId !== b.clipId) return false;
+    if (Math.abs(a.start - b.start) >= CACHE_EPSILON || Math.abs(a.end - b.end) >= CACHE_EPSILON) return false;
+  }
+  return true;
+}
 
 function findCachedVoice(
   settingsInput: SettingsPathsInput,
@@ -378,7 +674,9 @@ function findCachedVoice(
   scope: 'local' | 'project',
   provider: VoiceProvider,
   accountRef: string | undefined,
-  range: { clipId: string; start: number; end: number }
+  range: { clipId: string; start: number; end: number },
+  // Present ⇒ MULTI-WINDOW request class; absent ⇒ LEGACY single-window request class.
+  multiWindow?: MultiWindowIdentity
 ): VoiceRecord | null {
   // Cache reuse is strictly project-scoped. The voices library is GLOBAL, so without a
   // project identity a common range (e.g. clip_001 / 0..10) could match a clone made
@@ -409,6 +707,31 @@ function findCachedVoice(
     if (v.accountRef !== accountRef) continue;
     if (v.cloneScope !== scope) continue;
     if (v.originProjectId !== projectId) continue;
+
+    // Class-symmetric matching on the multi-window identity. A record is MULTI-WINDOW-shaped
+    // iff it carries `windows`; a request is multi-window iff `multiWindow` is present. Never
+    // match across classes — a legacy record and a multi-window request describe different
+    // prepared audio even when their ranges coincide.
+    const recIsMultiWindow = !!v.windows;
+    const reqIsMultiWindow = !!multiWindow;
+    if (recIsMultiWindow !== reqIsMultiWindow) continue;
+
+    if (reqIsMultiWindow) {
+      // MULTI-WINDOW class: sourceClass + cleanupIdentity + ordered windows must ALL match.
+      // sourceClass distinguishes a raw multi-window clone from a cleaned one; cleanupIdentity
+      // (present only for cleaned) pins the exact cleaned bed so a re-cleaned recording misses.
+      const mw = multiWindow!;
+      if (v.sourceClass !== mw.sourceClass) continue;
+      // cleanupIdentity is undefined for raw and defined for cleaned on BOTH sides; strict ===
+      // gives class-then-value equality (undefined===undefined for raw, string eq for cleaned).
+      if (v.cleanupIdentity !== mw.cleanupIdentity) continue;
+      if (!windowsMatch(v.windows, mw.windows)) continue;
+      return v;
+    }
+
+    // LEGACY single-window class: sourceAudioRange only (unchanged semantics). A record that
+    // carries sourceClass but no windows is not legacy-shaped and is skipped by the class check
+    // above; here `v.windows` is always absent.
     const sar = v.sourceAudioRange;
     if (!sar) continue;
     if (sar.clipId !== range.clipId) continue;
@@ -443,6 +766,30 @@ export async function cloneCleanClip(
   let accountRef: string | undefined = params.accountRef?.trim();
   if (params.accountRef === undefined && params.baseUrl) {
     try { accountRef = new URL(params.baseUrl).host; } catch { /* malformed baseUrl fails later in the adapter with a clearer error */ }
+  }
+
+  const settingsInput: SettingsPathsInput = { homeDir: params.homeDir, workspacePath: params.workspacePath, etvsDir: params.etvsDir };
+  const accountPreflight = () => {
+    // Shared accountRef preflight — same rationale as the single-window path: reject an invalid
+    // accountRef BEFORE any remote clone so it never consumes a voice slot and then strands.
+    if (accountRef !== undefined && accountRef.length === 0) throw new Error('cloneCleanClip: accountRef must be non-empty when provided (it is the cache\'s account discriminator; omit it entirely for an account-unscoped clone).');
+    if (accountRef !== undefined && accountRef.length > 200) throw new Error(`cloneCleanClip: accountRef exceeds the 200-character limit (got ${accountRef.length}).`);
+  };
+
+  // Multi-window mode is engaged only when the provider actually supports >1 sample AND the
+  // caller supplied windows. A maxSamples===1 provider (Cartesia) IGNORES multiWindow and keeps
+  // byte-identical single-window behavior — but a bad request (asking Cartesia for multi-window)
+  // would silently degrade, so the caller is expected to only pass multiWindow to a capable
+  // provider; we fall back to single-window rather than error to stay permissive.
+  if (params.multiWindow && cloneCfg.maxSamples > 1) {
+    // referenceRange and multiWindow are mutually-exclusive prep paths — but only when
+    // multi-window mode actually engages. A maxSamples===1 provider ignores multiWindow and
+    // uses referenceRange (below), so the conflict only matters here.
+    if (params.referenceRange) {
+      throw new Error('cloneCleanClip: referenceRange and multiWindow are mutually exclusive for a multi-sample provider — pass one prep path.');
+    }
+    accountPreflight();
+    return cloneMultiWindow(workspace, params, { provider, cloneCfg, accountRef, settingsInput, multiWindow: params.multiWindow });
   }
 
   // Determine the selection
@@ -480,8 +827,8 @@ export async function cloneCleanClip(
     });
   }
 
-  // Cache check: look for an existing voice with matching scope/project/range
-  const settingsInput: SettingsPathsInput = { homeDir: params.homeDir, workspacePath: params.workspacePath, etvsDir: params.etvsDir };
+  // Cache check: look for an existing voice with matching scope/project/range (LEGACY class —
+  // no multiWindow arg, so it matches only legacy-shaped records, never a multi-window one).
   const cached = findCachedVoice(settingsInput, params.projectId, selection.scope, provider, accountRef, {
     clipId: selection.clipId,
     start: selection.start,
@@ -489,7 +836,7 @@ export async function cloneCleanClip(
   });
   if (cached) {
     const refRel = `media/${selection.clipId}/reference-48k.wav`;
-    return { voice: cached, selection, cached: true, referencePath: refRel };
+    return { voice: cached, selection, cached: true, referencePath: refRel, sampleCount: 1 };
   }
 
   // Validate the length-constrained voice-record fields BEFORE any extraction or the
@@ -504,8 +851,7 @@ export async function cloneCleanClip(
   // 1..200 chars when present, and upsertVoice only runs AFTER the remote clone succeeds. An
   // invalid accountRef must fail HERE, not consume a provider voice slot and then strand the
   // clone with no local cache record.
-  if (accountRef !== undefined && accountRef.length === 0) throw new Error('cloneCleanClip: accountRef must be non-empty when provided (it is the cache\'s account discriminator; omit it entirely for an account-unscoped clone).');
-  if (accountRef !== undefined && accountRef.length > 200) throw new Error(`cloneCleanClip: accountRef exceeds the 200-character limit (got ${accountRef.length}).`);
+  accountPreflight();
 
   // Extract 48k full-band reference (never the 16k STT copy)
   const refRel = await extractFullBandReference(workspace, selection.clipId);
@@ -593,9 +939,153 @@ export async function cloneCleanClip(
       }
     });
 
-    return { voice, selection, cached: false, referencePath: refRel };
+    return { voice, selection, cached: false, referencePath: refRel, sampleCount: 1 };
   } finally {
     // Clean up temp prep files
+    try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ── Multi-window prep + upload (S1a) ─────────────────────────────────────────────
+// Preps EACH resolved window separately (slice → pause retain-cap 1.5s → clone-band loudnorm
+// −20/−3) and uploads them as SEPARATE samples in ONE clone call. Records the multi-window
+// cache identity (sourceClass + cleanupIdentity + canonical ordered windows). Only reached when
+// the provider's maxSamples > 1 (EL); Cartesia never gets here (single-window path above).
+async function cloneMultiWindow(
+  workspace: string,
+  params: CloneCleanClipParams & SettingsPathsInput & { projectId?: string },
+  ctx: {
+    provider: VoiceProvider;
+    cloneCfg: { clone: CloneFn; maxSamples: number };
+    accountRef: string | undefined;
+    settingsInput: SettingsPathsInput;
+    multiWindow: NonNullable<CloneCleanClipParams['multiWindow']>;
+  }
+): Promise<CloneCleanClipResult> {
+  const { provider, cloneCfg, accountRef, settingsInput, multiWindow } = ctx;
+  const { windows, sourceClass, cleanupIdentity, cleanedAssetPath } = multiWindow;
+
+  // Validate the request shape up front (before any extraction / remote call).
+  if (windows.length === 0) throw new Error('cloneCleanClip: multiWindow.windows must be non-empty.');
+  if (windows.length > cloneCfg.maxSamples) throw new Error(`cloneCleanClip: ${windows.length} windows exceeds provider ${provider}'s ${cloneCfg.maxSamples}-sample budget.`);
+  for (const w of windows) {
+    if (!Number.isFinite(w.start) || !Number.isFinite(w.end)) throw new Error('cloneCleanClip: multiWindow window start/end must be finite numbers.');
+    if (w.start < 0 || w.end <= w.start) throw new Error(`cloneCleanClip: multiWindow window must satisfy 0 <= start < end (got ${w.start}..${w.end}).`);
+    if (w.clipId.length > 128) throw new Error(`cloneCleanClip: window clipId "${w.clipId}" exceeds the 128-character limit.`);
+  }
+  // Windows must already be in canonical ascending-start order (as selectCleanWindows returns
+  // them) — the cache identity compares positionally, so an out-of-order request would never
+  // cache-hit its own record. Enforce it rather than silently re-sort (a re-sort would mask a
+  // caller bug and desync the record from what the caller believes it stored).
+  for (let i = 1; i < windows.length; i++) {
+    if (windows[i]!.start < windows[i - 1]!.start) throw new Error('cloneCleanClip: multiWindow.windows must be in ascending-start order.');
+  }
+  // sourceClass ↔ cleanup coupling: 'cleaned' REQUIRES both cleanupIdentity and cleanedAssetPath;
+  // 'raw' must carry neither (a cleanupIdentity on a raw record would corrupt the cache identity).
+  if (sourceClass === 'cleaned') {
+    if (!cleanupIdentity) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity is required when sourceClass is "cleaned".');
+    if (!cleanedAssetPath) throw new Error('cloneCleanClip: multiWindow.cleanedAssetPath is required when sourceClass is "cleaned".');
+    if (cleanupIdentity.length > 200) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity exceeds the 200-character limit.');
+  } else {
+    if (cleanupIdentity) throw new Error('cloneCleanClip: multiWindow.cleanupIdentity must be omitted when sourceClass is "raw".');
+    if (cleanedAssetPath) throw new Error('cloneCleanClip: multiWindow.cleanedAssetPath must be omitted when sourceClass is "raw".');
+  }
+
+  // The scope is 'project' for a multi-window clone (it trains from the whole recording's
+  // eligible clip, not a local edit anchor). selection is reported as the spanning range across
+  // the chosen windows for provenance/UX (referencePath still points at the base clip's 48k ref).
+  const scope = params.scope;
+  const spanClipId = windows[0]!.clipId;
+  const spanStart = Math.min(...windows.map((w) => w.start));
+  const spanEnd = Math.max(...windows.map((w) => w.end));
+  const selection: CleanClipSelection = {
+    clipId: spanClipId, start: spanStart, end: spanEnd, scope,
+    spanSec: spanEnd - spanStart, meanConfidence: 1, maxInternalGap: 0,
+    reason: `multi-window:${sourceClass}:${windows.length}`
+  };
+
+  // Cache check — MULTI-WINDOW class. Passes the multiWindow identity so it matches only
+  // multi-window records of the same sourceClass/cleanupIdentity/windows, never a legacy record.
+  const cached = findCachedVoice(settingsInput, params.projectId, scope, provider, accountRef, {
+    clipId: spanClipId, start: spanStart, end: spanEnd
+  }, { sourceClass, cleanupIdentity, windows });
+  if (cached) {
+    const refRel = `media/${spanClipId}/reference-48k.wav`;
+    return { voice: cached, selection, cached: true, referencePath: refRel, sampleCount: windows.length };
+  }
+
+  // Field-length preflight (mirrors the single-window path) before any extraction / remote call.
+  const voiceName = params.name ?? `clone-${sourceClass}-${spanClipId}-${Math.round(spanStart)}-${Math.round(spanEnd)}`;
+  if (voiceName.length < 1 || voiceName.length > 200) throw new Error(`cloneCleanClip: voice name must be 1–200 characters (got ${voiceName.length}).`);
+  if (params.projectId !== undefined && params.projectId.length > 200) throw new Error('cloneCleanClip: projectId exceeds the 200-character originProjectId limit.');
+
+  // Resolve the base audio each window is sliced from. 'raw' → the 48k reference derivative of
+  // the base clip; 'cleaned' → the fresh cleaned WAV (caller-confirmed fresh). Both are sliced on
+  // the ASSET axis — the cleaned bed is length-preserving (EL Isolator returns a same-duration
+  // file), so window timestamps map 1:1.
+  let baseAudioAbs: string;
+  const refRel = await extractFullBandReference(workspace, spanClipId);
+  if (sourceClass === 'cleaned') {
+    baseAudioAbs = assertInside(workspace, cleanedAssetPath!);
+    if (!existsSync(baseAudioAbs)) throw new Error(`cloneCleanClip: cleaned asset not found at ${cleanedAssetPath} — cleanup artifact missing (regenerate studio cleanup or use sourceClass 'raw').`);
+  } else {
+    baseAudioAbs = assertInside(workspace, refRel);
+    // Hardened guard: never clone from the 16k STT copy (same as single-window path).
+    const sttPath = assertInside(workspace, `media/${spanClipId}/extracted-audio.wav`);
+    if (baseAudioAbs === sttPath) throw new Error('cloneCleanClip: reference path must not be the 16k STT audio');
+  }
+
+  const clipMediaDir = assertInside(workspace, `media/${spanClipId}`);
+  mkdirSync(clipMediaDir, { recursive: true });
+  const tempDir = mkdtempSync(join(clipMediaDir, '.clone-prep-multi-'));
+  try {
+    const samples: VoiceCloneSample[] = [];
+    for (let idx = 0; idx < windows.length; idx++) {
+      const w = windows[idx]!;
+      const slicedPath = join(tempDir, `slice-${idx}.wav`);
+      const trimmedPath = join(tempDir, `trimmed-${idx}.wav`);
+      const normedPath = join(tempDir, `normed-${idx}.wav`);
+      // Same prep chain as single-window, PER window: slice → pause retain-cap 1.5s → clone-band
+      // loudnorm (−20 LUFS / −3 dBTP). Each window becomes one separate sample.
+      await sliceAudioWindow(baseAudioAbs, w.start, w.end, slicedPath);
+      await trimPausesAndSilence(slicedPath, trimmedPath, { maxPauseSec: CLONE_PREP_MAX_PAUSE_SEC });
+      await loudnormClip(trimmedPath, normedPath, { integratedLufs: -20, truePeakDb: -3 });
+      samples.push({ audio: readFileSync(normedPath), fileName: `clip-${idx}.wav`, mimeType: 'audio/wav' });
+    }
+
+    // ONE clone call with N samples (EL's IVC accepts multiple sample files in a single add).
+    const cloneResult = await cloneCfg.clone({
+      name: voiceName,
+      samples,
+      secret: params.secret,
+      baseUrl: params.baseUrl,
+      signal: params.signal
+    });
+
+    if (cloneResult.voiceId.length > 128) throw new Error(`cloneCleanClip: ${provider} returned a voice id longer than 128 chars; the remote clone was created but cannot be persisted locally.`);
+    const voiceId = `voice-${randomBytes(4).toString('hex')}`;
+    const voice = upsertVoice({
+      ...settingsInput,
+      voice: {
+        id: voiceId,
+        name: voiceName,
+        provider,
+        voiceId: cloneResult.voiceId,
+        ...(accountRef !== undefined ? { accountRef } : {}),
+        ...(params.projectId ? { originProjectId: params.projectId } : {}),
+        cloneScope: scope,
+        // sourceAudioRange kept for back-compat/UX (the spanning range); the multi-window cache
+        // identity lives in the new fields below.
+        sourceAudioRange: { clipId: spanClipId, start: spanStart, end: spanEnd },
+        sourceClass,
+        ...(cleanupIdentity ? { cleanupIdentity } : {}),
+        windows,
+        provenance: { method: 'ivc', createdBy: 'clone-route' }
+      }
+    });
+
+    return { voice, selection, cached: false, referencePath: refRel, sampleCount: windows.length };
+  } finally {
     try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
 }
