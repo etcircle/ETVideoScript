@@ -290,6 +290,35 @@ describe('VoicesFileSchema handle dedupe — multi-clone safety', () => {
     }
   });
 
+  it('colon-containing accountRef/voiceId pairs do NOT falsely collide (injective tuple key)', () => {
+    // Hermes round-3 repro: with a ':'-joined handle, (accountRef 'acct:a', voiceId 'b') and
+    // (accountRef 'acct', voiceId 'a:b') both serialized to 'elevenlabs:acct:a:b', so the
+    // legitimate second record was rejected AFTER its paid remote clone. The JSON-tuple key
+    // escapes the delimiter — both tuples must persist.
+    const root = tempRoot();
+    try {
+      upsertVoice({
+        homeDir: root,
+        voice: {
+          id: 'colon-1', name: 'Colon 1', provider: 'elevenlabs', voiceId: 'b',
+          accountRef: 'acct:a'
+        } as any
+      });
+      upsertVoice({
+        homeDir: root,
+        voice: {
+          id: 'colon-2', name: 'Colon 2', provider: 'elevenlabs', voiceId: 'a:b',
+          accountRef: 'acct'
+        } as any
+      });
+      const library = readVoicesLibrary({ homeDir: root }).value;
+      expect(library.voices).toHaveLength(2);
+      expect(library.voices.map((v) => `${v.accountRef}|${v.voiceId}`).sort()).toEqual(['acct:a|b', 'acct|a:b']);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it('legacy untagged duplicates (no accountRef) are still rejected — untagged is its own class', () => {
     const root = tempRoot();
     try {

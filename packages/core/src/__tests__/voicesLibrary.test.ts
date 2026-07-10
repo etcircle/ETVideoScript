@@ -193,9 +193,10 @@ describe('voices library (~/.etvs/voices.json)', () => {
       let caught: unknown;
       try { readVoicesLibrary({ homeDir: root }); } catch (err) { caught = err; }
       expect((caught as { code?: string })?.code).toBe('invalid_settings');
-      // Handle format is provider:accountRef:voiceId; these legacy records have no
-      // accountRef, so the middle segment is empty ('' = the untagged account class).
-      expect(JSON.stringify((caught as { details?: unknown })?.details)).toMatch(/handle elevenlabs::el_same is already registered as eve-one/);
+      // The dedupe key is the JSON tuple [provider, accountRef ?? null, voiceId]; the error
+      // message names the fields separately for readability. These legacy records have no
+      // accountRef → "(no account)" = the untagged account class.
+      expect(JSON.stringify((caught as { details?: unknown })?.details)).toMatch(/voice el_same on elevenlabs \(no account\) is already registered as eve-one/);
     } finally { cleanup(root); }
   });
 });

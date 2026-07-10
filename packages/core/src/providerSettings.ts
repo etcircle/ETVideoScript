@@ -139,9 +139,11 @@ export const VoiceRecordSchema = z.object({
   cloneScope: z.enum(['local', 'project']).optional(),
   // Stable NON-SECRET identifier of the provider account/credential that created this clone
   // (secrets-store key name and/or endpoint host — NEVER a secret value; this file is
-  // chmod 600 but still must not hold key material). Cache reuse in cloneCleanClip requires
-  // it to match when present; records without it are legacy/account-unscoped and match any
-  // request for their provider. Optional ⇒ existing voices.json parses unchanged.
+  // chmod 600 but still must not hold key material). Cache reuse in cloneCleanClip is
+  // SYMMETRIC by tag class: a tagged record matches only requests with the IDENTICAL
+  // accountRef, and an untagged (legacy) record matches only untagged requests — never
+  // across classes in either direction (see findCachedVoice in voiceClone.ts).
+  // Optional ⇒ existing voices.json parses unchanged.
   accountRef: z.string().min(1).max(200).optional(),
   sourceAudioRange: z.object({
     clipId: z.string().min(1).max(128),
@@ -167,10 +169,15 @@ export const VoicesFileSchema = z.object({
   // is (provider, accountRef, voiceId): provider-local voice IDs are only unique WITHIN one
   // account, so the same voiceId under two DIFFERENT accounts is two legitimately distinct
   // voices — rejecting the second would fail persistence AFTER a paid remote clone succeeded
-  // (stranded clone). Untagged records use '' as their own account class (consistent with
-  // cloneCleanClip's symmetric tag-class cache matching); accountRef itself is min-1-char,
-  // so '' can never collide with a real tag, and legacy voices.json files (no accountRef
-  // anywhere) validate exactly as before.
+  // (stranded clone). Untagged records (accountRef absent → null in the tuple) are their own
+  // account class, consistent with cloneCleanClip's symmetric tag-class cache matching, and
+  // legacy voices.json files (no accountRef anywhere) validate exactly as before.
+  // The dedupe KEY is a JSON-encoded tuple, NOT a ':'-joined string: accountRef and voiceId
+  // may themselves contain ':', so naive joining is ambiguous — (accountRef 'acct:a',
+  // voiceId 'b') and (accountRef 'acct', voiceId 'a:b') would both serialize to
+  // 'provider:acct:a:b' and the legitimate second tuple would be rejected AFTER its paid
+  // clone. JSON.stringify escapes delimiters inside the fields, making the encoding
+  // injective; the error message stays human-readable by naming the fields separately.
   const seenIds = new Set<string>();
   const seenHandles = new Map<string, string>();
   file.voices.forEach((voice, index) => {
@@ -178,10 +185,11 @@ export const VoicesFileSchema = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['voices', index, 'id'], message: `duplicate voice id: ${voice.id}` });
     }
     seenIds.add(voice.id);
-    const handle = `${voice.provider}:${voice.accountRef ?? ''}:${voice.voiceId}`;
+    const handle = JSON.stringify([voice.provider, voice.accountRef ?? null, voice.voiceId]);
     const priorId = seenHandles.get(handle);
     if (priorId) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['voices', index, 'voiceId'], message: `voice handle ${handle} is already registered as ${priorId}` });
+      const accountLabel = voice.accountRef === undefined ? 'no account' : `account "${voice.accountRef}"`;
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['voices', index, 'voiceId'], message: `voice ${voice.voiceId} on ${voice.provider} (${accountLabel}) is already registered as ${priorId}` });
     }
     seenHandles.set(handle, voice.id);
   });
