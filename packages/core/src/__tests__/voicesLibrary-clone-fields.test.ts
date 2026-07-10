@@ -335,3 +335,54 @@ describe('VoicesFileSchema handle dedupe — multi-clone safety', () => {
     }
   });
 });
+
+// ── S1a multi-window fields: sourceClass / cleanupIdentity / windows ─────────────
+
+describe('VoiceRecordSchema — S1a multi-window fields', () => {
+  it('parses a legacy record (no S1a fields) with all S1a fields undefined', () => {
+    const legacy = {
+      schemaVersion: 1, id: 'legacy-mw', name: 'Legacy', provider: 'cartesia', voiceId: 'cart_x',
+      createdAt: '2026-07-10T00:00:00.000Z', updatedAt: '2026-07-10T00:00:00.000Z'
+    };
+    const parsed = VoiceRecordSchema.parse(legacy);
+    expect(parsed.sourceClass).toBeUndefined();
+    expect(parsed.cleanupIdentity).toBeUndefined();
+    expect(parsed.windows).toBeUndefined();
+  });
+
+  it('round-trips a raw multi-window record (sourceClass + windows, no cleanupIdentity)', () => {
+    const parsed = VoiceRecordSchema.parse({
+      schemaVersion: 1, id: 'mw-raw', name: 'MW', provider: 'elevenlabs', voiceId: 'el_mw',
+      cloneScope: 'project', sourceClass: 'raw',
+      windows: [{ clipId: 'clip_001', start: 1, end: 11 }, { clipId: 'clip_001', start: 15, end: 25 }],
+      createdAt: '2026-07-10T00:00:00.000Z', updatedAt: '2026-07-10T00:00:00.000Z'
+    });
+    expect(parsed.sourceClass).toBe('raw');
+    expect(parsed.windows).toHaveLength(2);
+    expect(parsed.cleanupIdentity).toBeUndefined();
+  });
+
+  it('round-trips a cleaned multi-window record (cleanupIdentity present)', () => {
+    const parsed = VoiceRecordSchema.parse({
+      schemaVersion: 1, id: 'mw-cleaned', name: 'MW', provider: 'elevenlabs', voiceId: 'el_mw_c',
+      cloneScope: 'project', sourceClass: 'cleaned', cleanupIdentity: 'sha256hex',
+      windows: [{ clipId: 'clip_001', start: 1, end: 11 }],
+      createdAt: '2026-07-10T00:00:00.000Z', updatedAt: '2026-07-10T00:00:00.000Z'
+    });
+    expect(parsed.sourceClass).toBe('cleaned');
+    expect(parsed.cleanupIdentity).toBe('sha256hex');
+  });
+
+  it('rejects an invalid sourceClass and a window with end <= start', () => {
+    expect(() => VoiceRecordSchema.parse({
+      schemaVersion: 1, id: 'bad', name: 'B', provider: 'elevenlabs', voiceId: 'v',
+      sourceClass: 'nope',
+      createdAt: '2026-07-10T00:00:00.000Z', updatedAt: '2026-07-10T00:00:00.000Z'
+    })).toThrow();
+    expect(() => VoiceRecordSchema.parse({
+      schemaVersion: 1, id: 'bad2', name: 'B', provider: 'elevenlabs', voiceId: 'v',
+      windows: [{ clipId: 'clip_001', start: 5, end: 5 }],
+      createdAt: '2026-07-10T00:00:00.000Z', updatedAt: '2026-07-10T00:00:00.000Z'
+    })).toThrow();
+  });
+});
