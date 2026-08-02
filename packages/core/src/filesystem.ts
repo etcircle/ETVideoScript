@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, copyFileSync, readdirSync, rmSync, statSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, copyFileSync, readdirSync, rmSync, statSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, relative, basename } from 'node:path';
 import { Project, ProjectSchema, ProjectSchemaV1 } from './schemas';
 import { ManifestV3Schema, type ManifestV3 } from './manifest/schema';
@@ -41,6 +42,95 @@ export function assertInside(workspacePath: string, targetPath: string): string 
   const rel = relative(workspace, resolved);
   if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return resolved;
   throw new Error(`Path escapes outside workspace: ${targetPath}`);
+}
+
+/**
+ * Symlink-safe read of a workspace-relative file (S1b ⟨Q7⟩).
+ *
+ * `assertInside` is LEXICAL only — it proves the *string* stays inside the workspace, not that
+ * the *filesystem* does. A symlink planted at the leaf (or at any ancestor directory) between
+ * a step-asset write and its replay would let an attacker substitute arbitrary bytes and have
+ * them attached to an approved operation. This closes that:
+ *
+ *   1. every ancestor directory from the workspace root down is `lstat`ed and must be a real
+ *      directory, never a symlink;
+ *   2. the leaf is opened with O_NOFOLLOW (open fails outright on a symlink);
+ *   3. `fstat` on the OPEN descriptor requires a regular file;
+ *   4. the content is read from THAT SAME descriptor and hashed — so the bytes the caller
+ *      verifies are provably the bytes behind the checked inode, not a re-resolved path.
+ *
+ * Callers must consume the returned buffer (e.g. stage it to a fresh temp file for ffmpeg)
+ * rather than re-opening `absPath`: re-opening reintroduces the race this function removed.
+ *
+ * Residual: the ancestor lstat walk is a check-then-use on directories (Node exposes no
+ * `openat`), so a directory swapped between the walk and the leaf open is not detectable here.
+ * The leaf itself — the substitution that actually changes the bytes — is race-free via O_NOFOLLOW.
+ */
+export function readRegularFileNoFollow(workspacePath: string, relPath: string): { bytes: Buffer; sha256: string; absPath: string } {
+  const workspace = resolve(workspacePath);
+  const absPath = assertInside(workspace, relPath);
+  const rel = relative(workspace, absPath);
+  if (rel === '') throw new Error(`readRegularFileNoFollow: refusing to read the workspace root as a file: ${relPath}`);
+  // Ancestor walk: workspace root itself is trusted (the caller chose it); every segment BELOW
+  // it up to (not including) the leaf must be a genuine directory.
+  const segments = rel.split(/[\\/]/).filter(Boolean);
+  let current = workspace;
+  for (let i = 0; i < segments.length - 1; i++) {
+    current = join(current, segments[i]!);
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) throw new Error(`readRegularFileNoFollow: path component is a symlink: ${relative(workspace, current)}`);
+    if (!stat.isDirectory()) throw new Error(`readRegularFileNoFollow: path component is not a directory: ${relative(workspace, current)}`);
+  }
+  // O_NOFOLLOW: open() fails with ELOOP when the final component is a symlink.
+  const fd = openSync(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`readRegularFileNoFollow: not a regular file: ${relPath}`);
+    const bytes = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const read = readSync(fd, bytes, offset, stat.size - offset, offset);
+      if (read <= 0) break;
+      offset += read;
+    }
+    const content = offset === stat.size ? bytes : bytes.subarray(0, offset);
+    return { bytes: content, sha256: createHash('sha256').update(content).digest('hex'), absPath };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Stage a workspace file into a PRIVATE regular file and hand back that path.
+ *
+ * `readRegularFileNoFollow` proves the bytes we read came from a real, non-symlinked file — but
+ * that proof evaporates the moment a downstream consumer (ffmpeg, ffprobe) re-opens the ORIGINAL
+ * path by name: an attacker who swaps a symlink in between gets arbitrary local audio uploaded
+ * to a paid provider. Staging closes the gap: the verified descriptor's bytes are written into a
+ * fresh file inside a 0700 mkdtemp directory whose name the attacker cannot predict, and the
+ * consumer is pointed at THAT.
+ *
+ * Callers must `dispose()` when done (the staged copy is a real file on disk).
+ */
+export function stageVerifiedWorkspaceFile(
+  workspacePath: string,
+  relPath: string,
+  options: { parentDir?: string; fileName?: string } = {}
+): { path: string; bytes: number; sha256: string; dispose: () => void } {
+  const verified = readRegularFileNoFollow(workspacePath, relPath);
+  const parent = options.parentDir ?? tmpdir();
+  mkdirSync(parent, { recursive: true });
+  const dir = mkdtempSync(join(parent, '.staged-'));
+  const staged = join(dir, options.fileName ?? basename(relPath) ?? 'staged.bin');
+  // 0600 + wx: the staged copy is readable only by this process's user and cannot clobber an
+  // existing file planted in the (freshly created, unguessable) directory.
+  atomicWriteFile(staged, verified.bytes, 0o600);
+  return {
+    path: staged,
+    bytes: verified.bytes.byteLength,
+    sha256: verified.sha256,
+    dispose: () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  };
 }
 
 function stableJsonValue(value: unknown): unknown {

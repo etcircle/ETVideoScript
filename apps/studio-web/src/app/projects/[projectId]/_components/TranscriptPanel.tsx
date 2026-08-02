@@ -2,7 +2,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { buildRenderPlanV3, deriveEditedScriptFromTimeMapV3, derivePreviewScriptFromTimeMapV3, type OperationV3, type V3EditedScriptToken, type V3PreviewScriptToken } from '@etvideoscript/core/browser';
-import { getSettingsProviders, getVoices, getWorkspaceSettings, type ProviderRecord, type TranscriptDoc, type VoiceRecord, type WorkspaceSettings } from '../../../../lib/api';
+import { ApiError, getCloneChainEstimate, getSettingsProviders, getTtsEstimate, getVoicePatchProgress, getVoices, getWorkspaceSettings, newRequestId, type CloneChainEstimate, type ProviderRecord, type TranscriptDoc, type VoicePatchProgress, type VoiceRecord, type WorkspaceSettings } from '../../../../lib/api';
 import { VoiceSampleRecorder } from '../../../settings/voice-sample-recorder';
 import { useEditorStore } from '../../../../store/editorStore';
 import { clipSpanTargetsForWords } from '../../../../store/editTargets';
@@ -10,6 +10,9 @@ import { decidePanelState, operationTimelineRange, toneClass, transcriptModeLabe
 import { deriveSilences, deriveSweepCandidates } from '../../../../store/designData';
 import { PanelState } from './state/PanelState';
 import { boundaryFromCaret, caretFromBoundary, deletedWordIndexForCaret, moveCaretBoundary, selectionFromBoundaries, type TranscriptCaret } from './transcriptCaret';
+// S1b clone-chain decision logic lives beside the component so the money-relevant parts
+// (replay-vs-rebill, the two-unit cost model) are unit-testable without rendering React.
+import { cloneChainIntentKey, cloneChainRemedy, requestIdIsSpent, CLONE_CHAIN_CALLS } from './cloneChain';
 
 // P3-A normalization: strip trailing punctuation, lowercase
 function normalizeFiller(text: string) { return text.replace(/[.,!?;:]+$/, '').toLowerCase(); }
@@ -19,15 +22,30 @@ type BadgeSegment = Record<string, unknown>;
 
 const MOCK_TTS_PROVIDER: ProviderRecord = { id: 'tts.mock', kind: 'tts', name: 'mock', tier: 'local', enabled: true, default: false };
 const STOCK_VOICES: Record<string, readonly string[]> = { 'tts.mock': ['eve'], 'tts.xai': ['eve'] };
-// Mirrors adapter pricing in packages/core/src/providers/tts/*; update both places when rates change.
-const TTS_USD_PER_CHAR_BY_PROVIDER: Partial<Record<string, number | Partial<Record<string, number>>>> = {
-  'tts.xai': 0.000015,
-  'tts.elevenlabs': { eleven_multilingual_v2: 0.0001, eleven_turbo_v2_5: 0.00005, eleven_flash_v2_5: 0.00005 },
-  'tts.mock': 0
-};
+// NOTE: there is deliberately NO pricing table here. Every cost figure in this panel — legacy
+// path included — comes from the server's estimator, which prices with the same adapters and the
+// same cap arithmetic the real call uses. A client-side mirror could not see costPerUnit
+// overrides, could not know which ledger rows count toward a cap, and drifted the moment either
+// changed.
 const AVAILABLE_MODELS: Partial<Record<string, readonly string[]>> = {
   'tts.elevenlabs': ['eleven_multilingual_v2', 'eleven_turbo_v2_5', 'eleven_flash_v2_5']
 };
+
+// ─── S1b clone chain ─────────────────────────────────────────────────────────
+// The chain is the ear-locked recipe: TTS in the prepared clone, then EL speech-to-speech onto
+// the SAME clone, then the seam baked on the cleaned bed. Two paid calls, one user action. The
+// voice and the models are fixed server-side (⟨Q6⟩ rejects provider/voice/model with a 400), so
+// the confirm step has nothing to pick — it collapses to "your voice".
+/**
+ * A cost estimate together with the intent it was computed for. Comparing `key` against the
+ * current intent at render is what makes "no priced estimate for THIS request" an explicit,
+ * blocking state rather than an absence nobody checks.
+ */
+type EstimateState = { key: string; status: 'loading' | 'ready' | 'error'; value: CloneChainEstimate | null };
+
+function stepLabel(status: string) {
+  return status === 'succeeded' ? '✓' : status === 'failed' ? '✕' : status === 'running' ? '…' : '·';
+}
 
 // Design GMARK table (transcript.jsx line 207)
 const GMARK: Record<string, { g: string; cls: string; label: string }> = {
@@ -120,15 +138,19 @@ function wordCountLabel(count: number) {
   return `${count} ${count === 1 ? 'word' : 'words'}`;
 }
 
-function money(value: number) {
-  return `$${value.toFixed(4)}`;
-}
-
-function rateFor(providerId: string, model: string) {
-  const rate = TTS_USD_PER_CHAR_BY_PROVIDER[providerId];
-  if (typeof rate === 'number') return rate;
-  if (!rate) return 0;
-  return rate[model] ?? Object.values(rate)[0] ?? 0;
+/**
+ * P2-7: format in the currency the SERVER reported. Not every provider bills in dollars (Cartesia
+ * quotes credits), and printing '$' in front of a credit figure is a lie about what the user is
+ * being charged. Non-ISO codes fall back to a prefixed label rather than throwing in Intl.
+ */
+function money(value: number | null | undefined, currency: string | null = 'USD') {
+  if (value == null) return '—';
+  const code = currency ?? 'USD';
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: code, minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(value);
+  } catch {
+    return `${code} ${value.toFixed(4)}`;
+  }
 }
 
 function resolveProviderDefault(providers: ProviderRecord[], settings: WorkspaceSettings | null) {
@@ -460,7 +482,6 @@ export function TranscriptPanel() {
   const manifest = useEditorStore((s) => s.manifest);
   const transcript = useEditorStore((s) => s.transcript);
   const diagnostics = useEditorStore((s) => s.diagnostics);
-  const costSummary = useEditorStore((s) => s.costSummary);
   const loading = useEditorStore((s) => s.loading);
   const transcriptMode = useEditorStore((s) => s.transcriptMode);
   const seekAction = useEditorStore((s) => s.seek);
@@ -470,6 +491,12 @@ export function TranscriptPanel() {
   const createOperation = useEditorStore((s) => s.createOperation);
   const createVoicePatch = useEditorStore((s) => s.createVoicePatch);
   const createSpeechToSpeechPatch = useEditorStore((s) => s.createSpeechToSpeechPatch);
+  // S1b: the project's prepared clone. `ready` is what switches the confirm step from the
+  // legacy provider/voice picker to the collapsed "your voice" chain.
+  const voice = useEditorStore((s) => s.voice);
+  const prepareVoice = useEditorStore((s) => s.prepareVoice);
+  const refreshVoiceStatus = useEditorStore((s) => s.refreshVoiceStatus);
+  const createCloneChainVoicePatch = useEditorStore((s) => s.createCloneChainVoicePatch);
   const updateOperation = useEditorStore((s) => s.updateOperation);
   const disableOperation = useEditorStore((s) => s.disableOperation);
   const uploadVideoAsset = useEditorStore((s) => s.uploadVideoAsset);
@@ -522,6 +549,45 @@ export function TranscriptPanel() {
   const [speedOpen, setSpeedOpen] = useState(false);
   const [rippleBadge, setRippleBadge] = useState<{ deltaSec: number } | null>(null);
   const rippleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ─── clone-chain generation state ─────────────────────────────────────────
+  const [chainBusy, setChainBusy] = useState(false);
+  const [chainProgress, setChainProgress] = useState<VoicePatchProgress | null>(null);
+  /**
+   * Server-computed cost + cap verdict, TAGGED with the intent it answers.
+   *
+   * Untagged state made the disclosure gate bypassable: during the debounce window, or after a
+   * failed fetch, the estimate was simply null and Confirm stayed live — so the user could
+   * commit to a paid sequence nobody had priced. Staleness is now decided at render by comparing
+   * this key against the current intent, not by a passive effect that might not have run yet.
+   */
+  const [chainEstimate, setChainEstimate] = useState<EstimateState | null>(null);
+  /** The same, for the legacy single-call TTS path. */
+  const [legacyEstimate, setLegacyEstimate] = useState<EstimateState | null>(null);
+  /** Bumped by the retry affordance to re-run a failed estimate fetch. */
+  const [estimateNonce, setEstimateNonce] = useState(0);
+  const [chainError, setChainError] = useState<{ message: string; errorCode?: string; retryReplays?: boolean } | null>(null);
+  /**
+   * D5/⟨R6⟩: ONE client-generated requestId per user action, reused on transport retry — that
+   * is what makes a retry replay the root terminal instead of paying twice. It is deliberately
+   * NOT regenerated on a network failure, and IS discarded whenever the intent changes (a
+   * different selection or different text hashes differently and would 409) or when the server
+   * produced a terminal for it.
+   */
+  const chainRequestIdRef = useRef<string | null>(null);
+  /**
+   * The COMPLETE intent the live requestId belongs to. Coordinates alone are not an identity:
+   * the same start/end on a different clip (or a different project) is a different request that
+   * the server hashes differently, and reusing the id there is a guaranteed
+   * `request-id-conflict`.
+   */
+  const chainIntentRef = useRef<string | null>(null);
+  const chainProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /**
+   * Generation token for progress polls. A poll from a superseded attempt can still be in
+   * flight when a newer one starts; without this its response would paint stale step states
+   * over the current generation.
+   */
+  const chainProgressSeqRef = useRef(0);
 
   const panelState = decidePanelState({ loading, panel: 'transcript', project, diagnostics, transcript });
   const timeMap = useMemo(() => manifest ? buildRenderPlanV3(manifest).timeMap : null, [manifest]);
@@ -652,10 +718,47 @@ export function TranscriptPanel() {
     return [...(STOCK_VOICES[selectedProvider.id] || ['eve'])];
   }, [selectedProvider.id, voices]);
   const elevenlabsVoices = useMemo(() => voices.filter((v) => v.provider === 'elevenlabs'), [voices]);
-  const estimatedCost = Number((replacement.trim().length * rateFor(selectedProvider.id, effectiveModel)).toFixed(6));
-  const spent = costSummary?.totalsByProvider.find((total) => total.provider === selectedProvider.id)?.estimatedTotal ?? 0;
-  const cap = workspaceSettings?.paidCaps[selectedProvider.id];
-  const capExceeded = selectedProvider.tier === 'paid' && cap != null && cap - spent < estimatedCost;
+
+  // ─── clone chain: availability, estimate, cap ───────────────────────────────
+  // The chain runs only when a clone is READY for the CURRENT cleanup generation. Every other
+  // voice state keeps the legacy picker exactly as it was (D9/⟨R6⟩ — legacy behaviour is
+  // preserved everywhere) and adds a prepare CTA on top.
+  const cloneChainReady = voice.state === 'ready';
+  const chainChars = replacement.trim().length;
+  // The STS step bills by the duration of its SOURCE (the TTS output), whose exact length is
+  // unknown until the first call runs — the selection's duration is the honest pre-call proxy,
+  // and it is sent to the server, which does the actual pricing.
+  const chainStsSourceSec = Math.max(0, selectionEnd - selectionStart);
+
+  // ─── estimate gating: no priced disclosure, no Confirm ──────────────────────
+  // The keys pin an estimate to the exact request it prices. Anything else — the debounce
+  // window, a failed fetch, a changed selection — is "not priced yet", and a paid action the
+  // user has not been shown the price of must not be one keypress away. The server now runs the
+  // same ordered admission before the first paid call, so this gate is a disclosure guarantee
+  // rather than the last line of defence.
+  const chainEstimateKey = JSON.stringify(['chain', projectId, chainChars, chainStsSourceSec]);
+  const legacyEstimateKey = JSON.stringify(['legacy', projectId, selectedProvider.id, effectiveModel, chainChars]);
+  const chainEst = chainEstimate?.key === chainEstimateKey ? chainEstimate : null;
+  const legacyEst = legacyEstimate?.key === legacyEstimateKey ? legacyEstimate : null;
+  // "Priced" means EVERY paid step carries a number — not merely that the request returned.
+  // A step the provider cannot cost is money nobody has disclosed, and under a cap the engine
+  // refuses it anyway; either way Confirm must not be live.
+  //
+  // It gates ONLY the Confirm predicate. The estimate itself stays bound whenever the server
+  // answered, because the unpriceable cases (provider disabled, provider missing, an
+  // uncostable call) are exactly the ones whose refusal copy the user needs to see — and
+  // hiding the value behind `fullyPriced` made that banner unreachable.
+  const fullyPriced = (state: EstimateState | null) =>
+    state?.status === 'ready' && state.value != null && state.value.steps.length > 0 && state.value.steps.every((step) => typeof step.estimated === 'number');
+  const chainPriced = fullyPriced(chainEst);
+  const legacyPriced = fullyPriced(legacyEst);
+  const chainEstimateValue = chainEst?.status === 'ready' ? chainEst.value : null;
+  const legacyEstimateValue = legacyEst?.status === 'ready' ? legacyEst.value : null;
+  const chainCapExceeded = chainEstimateValue?.wouldExceedCap === true;
+  const capExceeded = legacyEstimateValue?.wouldExceedCap === true;
+  // The last failure requires a human to resolve it — Confirm must not reissue the request.
+  const chainBlocked = chainError != null && cloneChainRemedy(chainError) === 'operator';
+  const chainStep = (step: 'tts' | 'sts') => chainProgress?.steps.find((entry) => entry.step === step)?.status ?? 'pending';
 
   useEffect(() => {
     if (!providerOptions.some((provider) => provider.id === selectedProviderId)) setSelectedProviderId(defaultProviderId);
@@ -665,6 +768,59 @@ export function TranscriptPanel() {
     setReplacePickerOpen(false); setRecordPickerOpen(false); setRecordBlob(null); setRecordError(null);
   }, [selectionStart, selectionEnd]);
   useEffect(() => () => { if (rippleTimerRef.current) clearTimeout(rippleTimerRef.current); }, []);
+  useEffect(() => () => { if (chainProgressTimerRef.current) clearInterval(chainProgressTimerRef.current); }, []);
+  // Switching project invalidates everything about an in-flight generation's UI: the id belongs
+  // to another workspace, and any late progress response must be dropped.
+  useEffect(() => {
+    chainRequestIdRef.current = null;
+    chainIntentRef.current = null;
+    chainProgressSeqRef.current += 1;
+    if (chainProgressTimerRef.current) { clearInterval(chainProgressTimerRef.current); chainProgressTimerRef.current = null; }
+    setChainError(null);
+    setChainProgress(null);
+    setChainEstimate(null);
+  }, [projectId]);
+  // A changed selection or changed text is a different user action; clear the stale surfaces.
+  // The requestId itself is validated against the FULL intent key at submit time (a coordinate
+  // pair is not an identity), so it is not dropped here.
+  useEffect(() => { setChainError(null); setChainProgress(null); }, [selectionStart, selectionEnd, replacement]);
+  /**
+   * Ask the SERVER what this generation costs and whether the cap admits it. Debounced because
+   * it moves with every keystroke; the estimate is cleared while a newer answer is pending so a
+   * stale figure is never shown next to a changed request.
+   */
+  /**
+   * Price the pending generation, SERVER-SIDE, and tag the answer with the request it prices.
+   *
+   * Nothing here clears state on a passive schedule: the key comparison at render already makes
+   * a superseded estimate invisible, and a failure becomes an explicit, retryable 'error' state
+   * rather than an absence that silently unblocks Confirm.
+   */
+  useEffect(() => {
+    if (!replacePickerOpen || !cloneChainReady || !projectId || chainChars === 0) return;
+    let cancelled = false;
+    setChainEstimate({ key: chainEstimateKey, status: 'loading', value: null });
+    const handle = setTimeout(() => {
+      void getCloneChainEstimate(projectId, { chars: chainChars, sourceDurationSec: chainStsSourceSec })
+        .then((estimate) => { if (!cancelled) setChainEstimate({ key: chainEstimateKey, status: 'ready', value: estimate }); })
+        // No local fallback: a guessed number presented as the cost is worse than none, and
+        // proceeding unpriced is worse than either.
+        .catch(() => { if (!cancelled) setChainEstimate({ key: chainEstimateKey, status: 'error', value: null }); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [replacePickerOpen, cloneChainReady, projectId, chainChars, chainStsSourceSec, chainEstimateKey, estimateNonce]);
+  /** The same, for the legacy provider/voice path — no cost figure is computed client-side. */
+  useEffect(() => {
+    if (!replacePickerOpen || cloneChainReady || !projectId || chainChars === 0) return;
+    let cancelled = false;
+    setLegacyEstimate({ key: legacyEstimateKey, status: 'loading', value: null });
+    const handle = setTimeout(() => {
+      void getTtsEstimate(projectId, { providerId: selectedProvider.id, chars: chainChars, ...(effectiveModel ? { model: effectiveModel } : {}) })
+        .then((estimate) => { if (!cancelled) setLegacyEstimate({ key: legacyEstimateKey, status: 'ready', value: estimate }); })
+        .catch(() => { if (!cancelled) setLegacyEstimate({ key: legacyEstimateKey, status: 'error', value: null }); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [replacePickerOpen, cloneChainReady, projectId, chainChars, selectedProvider.id, effectiveModel, legacyEstimateKey, estimateNonce]);
   useEffect(() => {
     const preferred = workspaceSettings?.taskOptions.tts.defaultVoice;
     const nextVoice = preferred?.providerId === selectedProvider.id && voiceOptions.includes(preferred.voiceId) ? preferred.voiceId : voiceOptions[0] || '';
@@ -726,6 +882,9 @@ export function TranscriptPanel() {
   }
 
   function openReplacePicker() {
+    // Re-price on every entry: the user may have gone to Settings and raised the very cap that
+    // blocked them, and a cached refusal would keep Confirm dead until something else moved.
+    setEstimateNonce((n) => n + 1);
     const targets = selectedTargets();
     if (targets.length > 1) { setSelectionError('Replacement speech must stay within a single clip.'); return; }
     const target = targets[0];
@@ -776,6 +935,8 @@ export function TranscriptPanel() {
     if (targets.length > 1) { setSelectionError('Replacement speech must stay within a single clip.'); return; }
     const target = targets[0];
     if (!target || !replacement.trim() || !selectedVoice || capExceeded) return;
+    // Same pre-disclosure gate as the clone chain: no priced estimate, no paid call.
+    if (!legacyPriced) return;
     setSelectionError(null);
     if (rippleTimerRef.current) { clearTimeout(rippleTimerRef.current); rippleTimerRef.current = null; }
     setRippleBadge(null);
@@ -797,6 +958,120 @@ export function TranscriptPanel() {
     setReplacePickerOpen(false);
     setReplacement('');
     setDrag(null);
+  }
+
+  /**
+   * The clone-chain generate (D9 `mode: 'clone-chain'`).
+   *
+   * One user action = one requestId = at most one billing of each paid step. While the POST is
+   * in flight we poll the step ledger (⟨R7⟩ progress endpoint) so the two paid calls are visible
+   * as they happen rather than as one opaque spinner.
+   */
+  async function confirmCloneChainGenerate() {
+    const targets = selectedTargets();
+    if (targets.length > 1) { setSelectionError('Replacement speech must stay within a single clip.'); return; }
+    const target = targets[0];
+    const text = replacement.trim();
+    if (!target || !text || chainBusy || chainCapExceeded) return;
+    // Guarded here too, not only on the button: a keyboard path or a stale click must not
+    // reissue a request whose blocking condition nobody has cleared, and must not commit to a
+    // paid sequence the user has not been shown a price for.
+    if (!chainPriced) return;
+    if (chainError != null && cloneChainRemedy(chainError) === 'operator') return;
+    setSelectionError(null);
+    setChainError(null);
+    if (rippleTimerRef.current) { clearTimeout(rippleTimerRef.current); rippleTimerRef.current = null; }
+    setRippleBadge(null);
+    // The id is reused ONLY for the identical intent — same project, clip, coordinates and
+    // text. That is the replay case a client-generated id exists for; anything else is a
+    // different request the server would hash differently.
+    const intentKey = cloneChainIntentKey({ projectId, clipId: target.clipId, start: target.start, end: target.end, text });
+    const requestId = chainIntentRef.current === intentKey && chainRequestIdRef.current ? chainRequestIdRef.current : newRequestId();
+    chainRequestIdRef.current = requestId;
+    chainIntentRef.current = intentKey;
+    setChainBusy(true);
+    setChainProgress(null);
+    if (chainProgressTimerRef.current) clearInterval(chainProgressTimerRef.current);
+    const progressSeq = chainProgressSeqRef.current + 1;
+    chainProgressSeqRef.current = progressSeq;
+    chainProgressTimerRef.current = setInterval(() => {
+      void getVoicePatchProgress(projectId, requestId)
+        // Drop anything that belongs to a superseded attempt (or another project).
+        .then((progress) => { if (chainProgressSeqRef.current === progressSeq) setChainProgress(progress); })
+        .catch(() => { /* the POST's own result is the authority; progress is decoration */ });
+    }, 900);
+    try {
+      const replacedIds = [...generateFromMuteOpIds];
+      // The supersede cleanup is handed to the store so it is addressed to THIS project even if
+      // the user navigates away mid-generation; running it here would apply these ids to
+      // whatever project happens to be current when the paid call returns.
+      const result = await createCloneChainVoicePatch({
+        requestId, clipId: target.clipId, start: target.start, end: target.end, text,
+        reason: 'Replacement speech in your prepared voice',
+        ...(replacedIds.length ? { supersedeOperationIds: replacedIds } : {})
+      });
+      // Terminal reached — this id has a root terminal now, so a further Confirm must be a new
+      // action rather than a replay of this one.
+      chainRequestIdRef.current = null;
+      chainIntentRef.current = null;
+      // The generation belongs to a project the user has left: it is persisted and its cleanup
+      // has been applied there, but none of the surfaces below describe what is on screen now.
+      if (result.status === 'stale') return;
+      if (replacedIds.length) {
+        setGenerateFromMuteOpIds([]);
+        setDraftMuteOpIds((ids) => ids.filter((id) => !replacedIds.includes(id)));
+      }
+      const deltaSec = result.response.operation.durationGeneratedSec - (target.end - target.start);
+      if (deltaSec > 0.05) {
+        if (rippleTimerRef.current) clearTimeout(rippleTimerRef.current);
+        setRippleBadge({ deltaSec });
+        rippleTimerRef.current = setTimeout(() => setRippleBadge(null), 1500);
+      }
+      setReplacePickerOpen(false);
+      setReplacement('');
+      setDrag(null);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        // Only positive evidence releases the id (see requestIdIsSpent). An ambiguous 5xx — a
+        // proxy timing out after the backend accepted the POST — KEEPS it, so the retry replays
+        // the terminal instead of paying for the same generation twice.
+        const spent = requestIdIsSpent(error, requestId);
+        if (spent) {
+          chainRequestIdRef.current = null;
+          chainIntentRef.current = null;
+        }
+        const failure = { message: error.message, ...(error.errorCode ? { errorCode: error.errorCode } : {}), retryReplays: !spent };
+        setChainError(failure);
+        const remedy = cloneChainRemedy(failure);
+        if (remedy === 'prepare-voice') void refreshVoiceStatus();
+        if (remedy === 'cap') {
+          // The server just told us the cap refuses this generation, which contradicts whatever
+          // the estimate said. Replace it with the 409's own cap payload and mark it refused, so
+          // Confirm stays blocked until a fresh price says otherwise — a stale "affordable"
+          // estimate must not let the user bang on a refused request.
+          const body = error.body as { cap?: CloneChainEstimate['cap']; refusal?: CloneChainEstimate['refusal']; refusalScope?: CloneChainEstimate['refusalScope']; refusedAtStep?: string } | undefined;
+          setChainEstimate((current) => current == null ? current : ({
+            key: current.key,
+            status: 'ready',
+            value: {
+              ...(current.value ?? { calls: 0, steps: [], total: null, currency: null, authoritative: false, basis: 'selection-duration' as const, cap: { limit: null, spent: null, group: [] } }),
+              cap: body?.cap ?? current.value?.cap ?? { limit: null, spent: null, group: [] },
+              wouldExceedCap: true,
+              ...(body?.refusal ? { refusal: body.refusal } : {}),
+              ...(body?.refusalScope ? { refusalScope: body.refusalScope } : {}),
+              ...(body?.refusedAtStep ? { refusedAtStep: body.refusedAtStep } : {})
+            }
+          }));
+        }
+      } else {
+        // Transport failure — nothing is known about the server side, so KEEP the requestId and
+        // let the user retry into a replay.
+        setChainError({ message: error instanceof Error ? error.message : String(error), retryReplays: true });
+      }
+    } finally {
+      if (chainProgressTimerRef.current) { clearInterval(chainProgressTimerRef.current); chainProgressTimerRef.current = null; }
+      setChainBusy(false);
+    }
   }
 
   const [throttledCurrentTime, setThrottledCurrentTime] = useState(0);
@@ -1463,9 +1738,128 @@ export function TranscriptPanel() {
                   </div>
                 ) : null}
 
-                {/* Replace-speech picker */}
-                {replacePickerOpen && replacement.trim() ? (
+                {/*
+                  Replace-speech confirm — clone chain.
+
+                  When a clone is ready for the current cleanup generation there is nothing left
+                  to choose: the voice IS the project's clone and the models are the locked
+                  recipe (the server 400s on provider/voice/model), so the step collapses to
+                  "your voice" + what it will cost + what it is doing. The legacy picker below
+                  is untouched and still serves every other voice state.
+                */}
+                {replacePickerOpen && replacement.trim() && cloneChainReady ? (
+                  <div className="voice-patch-picker chain">
+                    <p className="voice-chain-head">
+                      <span className="voice-chain-glyph">☺</span>
+                      <span>Generate in <strong>your voice</strong></span>
+                    </p>
+                    {/*
+                      The figures come from the server, which prices both steps with the same
+                      adapters and cap arithmetic the real call uses. When it cannot price the
+                      call we say so instead of showing a number we made up.
+                    */}
+                    <p className="voice-cost">
+                      {chainEst?.status === 'error'
+                        ? <>Couldn't price this generation. <button type="button" className="link-button" onClick={() => setEstimateNonce((n) => n + 1)}>Retry →</button></>
+                        : chainEstimateValue == null
+                          ? <>Estimating… · {CLONE_CHAIN_CALLS} ElevenLabs calls (text-to-speech, then speech-to-speech onto your clone) · {chainChars} chars</>
+                          : !chainPriced
+                            ? <>Cost unavailable for this call · {chainChars} chars</>
+                            : chainEstimateValue!.total == null
+                            // Every step IS priced here (chainPriced), so a null total means the
+                            // steps disagree on currency — show them individually rather than
+                            // adding figures that cannot be added.
+                            ? <>Up to {chainEstimateValue!.steps.map((step) => `${step.step === 'tts' ? 'speech' : 'your voice'} ${money(step.estimated, step.currency)}`).join(' + ')} · {chainChars} chars</>
+                            : <>Estimated up to <strong>~{money(chainEstimateValue!.total, chainEstimateValue!.currency)}</strong> · {chainEstimateValue!.calls} ElevenLabs calls: {chainEstimateValue!.steps.map((step) => `${step.step === 'tts' ? 'speech' : 'your voice'} ${money(step.estimated, step.currency)}`).join(' + ')}
+                              {chainEstimateValue!.cap.limit != null ? <> · cap {money(chainEstimateValue!.cap.spent ?? 0, chainEstimateValue!.currency)}/{money(chainEstimateValue!.cap.limit, chainEstimateValue!.currency)}</> : null}</>}
+                    </p>
+                    {chainCapExceeded ? (
+                      <p className="voice-cap-error">
+                        {/*
+                          The remedies differ, so the copy must come from the server's own
+                          discriminator rather than be inferred from which step tripped: a step
+                          that breaches ON ITS OWN is not "they don't fit in sequence".
+                        */}
+                        {chainEstimateValue?.refusal === 'unknown-estimate'
+                          ? 'This call cannot be priced, so the spend cap cannot admit it — '
+                          : chainEstimateValue?.refusal === 'ledger-unreadable'
+                            ? 'The provider ledger cannot be totalled, so the spend cap cannot admit this call — check logs/provider-requests.jsonl, or '
+                            : chainEstimateValue?.refusal === 'provider-disabled'
+                              ? 'A provider this generation needs is disabled — '
+                              : chainEstimateValue?.refusal === 'provider-not-found'
+                              ? 'A provider this generation needs is not configured — '
+                              : chainEstimateValue?.refusalScope === 'sequence-only'
+                                ? 'The two calls fit individually but not in sequence — the cap would refuse the second one after billing the first. '
+                                : chainEstimateValue?.refusalScope === 'step-alone'
+                                  ? 'This generation is on its own larger than what the spend cap has left — '
+                                  : 'Workspace cap would be exceeded — '}
+                        <button type="button" className="link-button" onClick={() => router.push('/settings?tab=keys')}>review it in Settings →</button>
+                      </p>
+                    ) : null}
+                    {chainBusy ? (
+                      <p className="voice-chain-steps" role="status" aria-live="polite">
+                        <span className={`voice-chain-step ${chainStep('tts')}`}>{stepLabel(chainStep('tts'))} speech</span>
+                        <span className={`voice-chain-step ${chainStep('sts')}`}>{stepLabel(chainStep('sts'))} your voice</span>
+                        <span className={`voice-chain-step ${chainProgress?.seam ?? 'pending'}`}>{stepLabel(chainProgress?.seam ?? 'pending')} seam</span>
+                      </p>
+                    ) : null}
+                    {chainError ? (
+                      <p className="voice-cap-error" role="alert">
+                        {chainError.message}
+                        {(() => {
+                          switch (cloneChainRemedy(chainError)) {
+                            case 'prepare-voice':
+                              return <> <button type="button" className="link-button" onClick={() => { void prepareVoice(); }}>Prepare your voice →</button></>;
+                            case 'new-generation':
+                              return <> Start a new generation.</>;
+                            case 'cap':
+                              // Nothing was created and nothing was billed: the generation was
+                              // refused before its first paid call. Resubmitting unchanged is
+                              // refused identically, so the only move is the cap itself.
+                              return <> <button type="button" className="link-button" onClick={() => router.push('/settings?tab=keys')}>Raise or remove the spend cap →</button></>;
+                            case 'operator':
+                              // NOT "try again": a conflicting terminal already exists, so
+                              // re-Confirm re-hits the same bad state. Nothing is re-billed
+                              // (the id is retained), but a human has to look at the ledger.
+                              return <> This project's voice-patch ledger needs attention — check <code>logs/provider-requests.jsonl</code> in the workspace before generating again.</>;
+                            case 'retry-replays':
+                              // The id is still live, so Confirm resumes THIS generation.
+                              return <> Confirm again to resume this generation — it will not be charged twice.</>;
+                            default:
+                              return null;
+                          }
+                        })()}
+                      </p>
+                    ) : null}
+                    <div className="voice-patch-actions">
+                      {/* An operator-blocked failure is not retryable by the user: re-issuing
+                          the same request just re-hits the conflicting ledger state. */}
+                      <button type="button" className="primary" disabled={chainBusy || chainCapExceeded || chainBlocked || !chainPriced} onClick={() => { void confirmCloneChainGenerate(); }}>{chainBusy ? 'Generating…' : chainPriced ? 'Confirm generate' : chainEst?.status === 'ready' || chainEst?.status === 'error' ? "Can't price this" : 'Pricing…'}</button>
+                      <button type="button" disabled={chainBusy} onClick={() => setReplacePickerOpen(false)}>Cancel</button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Replace-speech picker — legacy provider/voice path (unchanged) */}
+                {replacePickerOpen && replacement.trim() && !cloneChainReady ? (
                   <div className="voice-patch-picker">
+                    {/*
+                      D3 prepare CTA. This branch only renders when the clone is NOT ready, so
+                      the legacy provider/voice path below stays available (nothing regresses for
+                      a project that never prepares a voice) while pointing at the better one.
+                    */}
+                    <p className="voice-prepare-cta">
+                      {voice.state === 'preparing'
+                        ? 'Your voice is still being prepared — generating in it will be available when it finishes.'
+                        : voice.state === 'stale'
+                          ? 'Your prepared voice is out of date (Studio Sound changed).'
+                          : voice.state === 'unknown-outcome'
+                            ? 'Your last voice preparation ended with an unknown outcome.'
+                            : 'No voice prepared for this recording yet.'}
+                      {voice.state === 'preparing'
+                        ? null
+                        : <> <button type="button" className="link-button" onClick={() => { void prepareVoice(); }}>{voice.state === 'none' ? 'Prepare your voice →' : 'Re-prepare your voice →'}</button></>}
+                    </p>
                     <label>Provider
                       <select value={selectedProvider.id} onChange={(event) => { setSelectedProviderId(event.target.value); setSelectedVoice(''); setSelectedModel(''); }}>
                         {providerOptions.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
@@ -1483,10 +1877,21 @@ export function TranscriptPanel() {
                         </select>
                       </label>
                     ) : null}
-                    <p className="voice-cost">Estimated <strong>{money(estimatedCost)}</strong> · {replacement.trim().length} chars × ${rateFor(selectedProvider.id, effectiveModel).toFixed(6)}/char</p>
+                    <p className="voice-cost">
+                      {legacyEst?.status === 'error'
+                        ? <>Couldn't price this call. <button type="button" className="link-button" onClick={() => setEstimateNonce((n) => n + 1)}>Retry →</button></>
+                        : legacyEstimateValue == null
+                          ? <>Estimating… · {replacement.trim().length} chars</>
+                          : !legacyPriced
+                            ? <>Cost unavailable for this provider · {replacement.trim().length} chars</>
+                            : legacyEstimateValue!.total == null
+                            ? <>{legacyEstimateValue!.steps.map((step) => money(step.estimated, step.currency)).join(' + ')} · {replacement.trim().length} chars</>
+                            : <>Estimated <strong>{money(legacyEstimateValue!.total, legacyEstimateValue!.currency)}</strong> · {replacement.trim().length} chars
+                                {legacyEstimateValue!.cap.limit != null ? <> · cap {money(legacyEstimateValue!.cap.spent ?? 0, legacyEstimateValue!.currency)}/{money(legacyEstimateValue!.cap.limit, legacyEstimateValue!.currency)}</> : null}</>}
+                    </p>
                     {capExceeded ? <p className="voice-cap-error">Workspace cap would be exceeded — <button type="button" className="link-button" onClick={() => router.push('/settings?tab=keys')}>raise it in Settings →</button></p> : null}
                     <div className="voice-patch-actions">
-                      <button type="button" className="primary" disabled={!selectedVoice || capExceeded} onClick={() => { void confirmReplaceSpeech(); }}>Confirm generate</button>
+                      <button type="button" className="primary" disabled={!selectedVoice || capExceeded || !legacyPriced} onClick={() => { void confirmReplaceSpeech(); }}>{legacyPriced ? 'Confirm generate' : legacyEst?.status === 'ready' || legacyEst?.status === 'error' ? "Can't price this" : 'Pricing…'}</button>
                       <button type="button" onClick={() => setReplacePickerOpen(false)}>Cancel</button>
                     </div>
                   </div>

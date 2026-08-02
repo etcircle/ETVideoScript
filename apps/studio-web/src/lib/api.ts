@@ -13,15 +13,50 @@ function authHeader(): Record<string, string> {
   return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
 }
 
-async function errorMessage(res: Response): Promise<string> {
+/**
+ * A failed API response, carrying the machine-readable discriminator alongside the message.
+ *
+ * The S1b clone chain answers with typed 409s (`clone-not-ready`, `clone-stale`,
+ * `clone-unknown-outcome`, `paid-step-unknown-outcome`, …) that the UI must branch on — a
+ * prepare CTA for one class, "start a new generation" for another. Matching on the prose would
+ * couple the client to server copy, so the code travels as a field. `message` is unchanged from
+ * the previous plain-Error behaviour, so every existing `catch` keeps rendering what it did.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly errorCode?: string;
+  readonly details?: Record<string, unknown>;
+  readonly body?: Record<string, unknown>;
+  constructor(message: string, status: number, errorCode?: string, details?: Record<string, unknown>, body?: Record<string, unknown>) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    if (errorCode !== undefined) this.errorCode = errorCode;
+    if (details !== undefined) this.details = details;
+    if (body !== undefined) this.body = body;
+  }
+}
+
+async function parseApiError(res: Response): Promise<{ message: string; errorCode?: string; details?: Record<string, unknown>; body?: Record<string, unknown> }> {
   const text = await res.text();
   try {
-    const parsed = JSON.parse(text) as { error?: string | { code?: string; message?: string } };
+    const parsed = JSON.parse(text) as { error?: string | { code?: string; message?: string }; errorCode?: string; details?: Record<string, unknown> };
     const error = parsed.error;
-    if (typeof error === 'string') return error;
-    if (error?.code || error?.message) return `${error.code || 'error'}: ${error.message || text}`;
+    const extras = {
+      ...(typeof parsed.errorCode === 'string' ? { errorCode: parsed.errorCode } : {}),
+      ...(parsed.details && typeof parsed.details === 'object' ? { details: parsed.details } : {}),
+      body: parsed as Record<string, unknown>
+    };
+    if (typeof error === 'string') return { message: error, ...extras };
+    if (error?.code || error?.message) return { message: `${error.code || 'error'}: ${error.message || text}`, ...extras };
+    return { message: text, ...extras };
   } catch {}
-  return text;
+  return { message: text };
+}
+
+async function apiError(res: Response): Promise<ApiError> {
+  const parsed = await parseApiError(res);
+  return new ApiError(parsed.message, res.status, parsed.errorCode, parsed.details, parsed.body);
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -34,7 +69,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   for (const [k, v] of Object.entries(authHeader())) headers.set(k, v);
   if (init?.body != null && !headers.has('content-type')) headers.set('Content-Type', 'application/json');
   const res = await fetch(`${API}${path}`, { ...init, headers, cache: 'no-store' });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw await apiError(res);
   return res.json();
 }
 
@@ -83,7 +118,10 @@ export type TranscriptWord = { id: string; text: string; start: number; end: num
 export type TranscriptSegment = { id?: string; segmentId?: string; speaker?: string; start?: number; end?: number; text?: string };
 export type TranscriptDoc = { words: TranscriptWord[]; segments?: TranscriptSegment[]; provider?: { name?: string; timing?: string }; durationSec?: number };
 export type JobStage = { name: string; status: string; clipId?: string; phase?: string; percent?: number; error?: string; completedAt?: string };
-export type Job = { jobId: string; type: string; status: 'queued' | 'running' | 'waiting_for_approval' | 'succeeded' | 'failed' | 'cancelled'; stages?: JobStage[]; outputs?: string[]; error?: string; createdAt: string; completedAt?: string };
+// errorCode/errorDetails are the S1b ⟨R5⟩ additive fields (JobRecordSchema / core's JobView):
+// the status enum was deliberately NOT widened, so an interrupted prepare-voice job is
+// `status:'failed'` + `errorCode:'interrupted'` and only the copy layer learns the new codes.
+export type Job = { jobId: string; type: string; status: 'queued' | 'running' | 'waiting_for_approval' | 'succeeded' | 'failed' | 'cancelled'; stages?: JobStage[]; outputs?: string[]; error?: string; errorCode?: string; errorDetails?: Record<string, unknown>; createdAt: string; completedAt?: string };
 export type FileState = { path: string; exists: boolean; size: number; updatedAt?: string };
 export type RenderFreshness = { state: 'missing' | 'rendering' | 'fresh' | 'stale' | 'error'; reason: string; output?: string; updatedAt?: string; manifestUpdatedAt?: string; jobId?: string };
 export type Diagnostics = {
@@ -156,7 +194,7 @@ export function createOperation(projectId: string, operation: CreateOperationInp
 export function createVoicePatch(projectId: string, input: CreateVoicePatchInput) { return api<OperationResponse>(projectPath(projectId, '/manifest/voice-patches'), { method: 'POST', body: JSON.stringify(input) }); }
 export async function speechToSpeechVoicePatch(projectId: string, formData: FormData): Promise<OperationResponse> {
   const res = await apiFetch(projectPath(projectId, '/manifest/voice-patches/speech-to-speech'), { method: 'POST', body: formData });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw await apiError(res);
   return res.json() as Promise<OperationResponse>;
 }
 export function createGeneration(projectId: string, input: CreateGenerationInput) { return api<GenerationResponse>(projectPath(projectId, '/assets/generations'), { method: 'POST', body: JSON.stringify(input) }); }
@@ -174,7 +212,7 @@ export async function uploadVideoAsset(projectId: string, file: File) {
   const form = new FormData();
   form.append('file', file);
   const res = await apiFetch(projectPath(projectId, '/assets/video'), { method: 'POST', body: form });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw await apiError(res);
   return res.json() as Promise<{ clipId: string; jobId: string }>;
 }
 
@@ -184,7 +222,7 @@ export async function uploadRecordingAsset(projectId: string, blob: Blob, source
   form.append('durationSec', String(durationSec));
   form.append('file', blob, `recording-${source}.${blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : blob.type.includes('wav') ? 'wav' : 'mp4'}`);
   const res = await apiFetch(projectPath(projectId, '/assets/recordings'), { method: 'POST', body: form });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw await apiError(res);
   return res.json() as Promise<{ clipId: string; jobId: string }>;
 }
 
@@ -203,12 +241,12 @@ export function getVoices(): Promise<{ voices: VoiceRecord[] }> { return api<{ v
 export function addVoice(voice: Omit<VoiceRecord, 'schemaVersion' | 'createdAt' | 'updatedAt'>): Promise<{ voice: VoiceRecord }> { return api<{ voice: VoiceRecord }>('/api/settings/voices', { method: 'POST', body: JSON.stringify(voice) }); }
 export async function cloneVoice(formData: FormData): Promise<{ voice: VoiceRecord }> {
   const res = await apiFetch('/api/settings/voices/clone', { method: 'POST', body: formData });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw await apiError(res);
   return res.json() as Promise<{ voice: VoiceRecord }>;
 }
 export async function enrollVoice(formData: FormData): Promise<{ voice: VoiceRecord; sampleCount: number }> {
   const res = await apiFetch('/api/settings/voices/enroll', { method: 'POST', body: formData });
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw await apiError(res);
   return res.json() as Promise<{ voice: VoiceRecord; sampleCount: number }>;
 }
 export function renameVoice(id: string, name: string): Promise<{ voice: VoiceRecord }> { return api<{ voice: VoiceRecord }>(`/api/settings/voices/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }); }
@@ -255,4 +293,150 @@ export function runStudioCleanup(projectId: string, requestId?: string): Promise
  */
 export function disableStudioCleanup(projectId: string): Promise<StudioCleanupDisableResponse> {
   return api<StudioCleanupDisableResponse>(projectPath(projectId, '/manifest/studio-cleanup'), { method: 'DELETE' });
+}
+
+// ─── S1b: prepared voice (clone) + the clone-chain patch ──────────────────────
+
+/** Mirrors `VoiceStatus` in apps/local-api/src/voiceRoutes.ts. */
+export type VoiceState = 'none' | 'preparing' | 'ready' | 'stale' | 'unknown-outcome';
+export type VoiceStatus = { state: VoiceState; voiceId?: string; jobId?: string; errorCode?: string; message?: string };
+
+/**
+ * POST /voice/prepare answers in one of three shapes:
+ *   202 { job, costDisclosure }   — a prepare-voice job was queued (the paid path)
+ *   202 { job, deduped: true }    — an equivalent job is already running (job is PARTIAL:
+ *                                   jobId/type/status only, no createdAt)
+ *   200 { status, cached: true }  — the clone already exists; nothing was billed
+ * A failed preflight is a 409 with `errorCode` (surfaced as ApiError).
+ */
+export type PrepareVoiceResponse = {
+  job?: { jobId: string; type?: string; status?: Job['status']; createdAt?: string; stages?: JobStage[] };
+  costDisclosure?: string;
+  deduped?: boolean;
+  status?: VoiceStatus;
+  cached?: boolean;
+};
+
+export type VoicePatchStepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type VoicePatchStepProgress = { step: 'tts' | 'sts'; status: VoicePatchStepStatus; durationSec?: number; error?: string };
+/** GET .../voice-patches/:requestId/progress — ⟨R7⟩ per-step activity while the POST is in flight. */
+export type VoicePatchProgress = {
+  requestId: string;
+  steps: VoicePatchStepProgress[];
+  seam: VoicePatchStepStatus;
+  done: boolean;
+  httpStatus?: number;
+};
+
+/**
+ * ⟨Q6⟩ clone-chain intake is a strict ALLOWLIST: anything else (provider, voice, voiceRef,
+ * model, language, cloneScope, referenceRange) is a 400. `requestId` is MANDATORY and
+ * client-generated (⟨R6⟩/D5) — it is what makes a transport retry replay instead of re-bill.
+ */
+export type CloneChainVoicePatchInput = {
+  requestId: string;
+  clipId?: string;
+  start: number;
+  end: number;
+  text: string;
+  granularity?: 'word' | 'phrase' | 'sentence';
+  reason?: string;
+};
+export type CloneChainStepArtifact = { relPath?: string; bytes?: number; sha256?: string; durationSec?: number; replayed?: boolean };
+/**
+ * NOTE: unlike the legacy voice-patch route this response does NOT carry the manifest — ⟨Q1⟩
+ * requires the terminal body to be finalized BEFORE the manifest mutation, so it cannot embed
+ * the post-mutation manifest. Callers must refresh the manifest themselves.
+ */
+export type CloneChainVoicePatchResponse = {
+  providerRequestId: string;
+  operation: {
+    id: string;
+    status: 'approved';
+    clipId: string;
+    start: number;
+    end: number;
+    text: string;
+    asset: string;
+    durationGeneratedSec: number;
+    durationRequestedSec: number;
+    seamBaked: boolean;
+  };
+  voiceId: string;
+  steps: { tts: CloneChainStepArtifact; sts: CloneChainStepArtifact };
+};
+
+/**
+ * What the server says a prospective clone-chain generation costs and whether the spend cap
+ * would refuse it. The client does NOT price the chain: the two steps bill on different units,
+ * a costPerUnit override turns either into a flat per-call amount, and only the server knows
+ * which ledger rows count toward the cap. `estimated: null` means the provider cannot price the
+ * call — under a cap that is itself a refusal.
+ */
+export type CloneChainStepEstimate = { step: string; providerId: string; currency: string; estimated: number | null; refusal?: string };
+export type CloneChainEstimate = {
+  calls: number;
+  steps: CloneChainStepEstimate[];
+  /** null when a step is unpriceable or the steps mix currencies — never a fabricated sum. */
+  total: number | null;
+  currency: string | null;
+  cap: { limit: number | null; spent: number | null; group: string[] };
+  /**
+   * The server's projection of its own admission check, run over the calls IN ORDER (two calls
+   * that each fit but do not fit in sequence are refused here, as they would be in production).
+   */
+  wouldExceedCap: boolean;
+  refusal?: 'cap-exceeded' | 'unknown-estimate' | 'ledger-unreadable' | 'provider-not-found' | 'provider-disabled';
+  /**
+   * For a cap refusal: does the step breach on its OWN, or only once the earlier steps of the
+   * sequence are counted? The remedies differ, so the copy must not guess.
+   */
+  refusalScope?: 'step-alone' | 'sequence-only';
+  /** Which step the refusal lands on, e.g. 'sts'. */
+  refusedAtStep?: string;
+  /**
+   * False when the estimate rests on a proxy input: the clone chain's STS step bills by the
+   * duration of the TTS OUTPUT, which does not exist until the first call runs, so the selection
+   * duration stands in for it. The UI must present such a verdict as an estimate.
+   */
+  authoritative: boolean;
+  basis: 'selection-duration' | 'exact-text';
+};
+
+export function getCloneChainEstimate(projectId: string, params: { chars: number; sourceDurationSec: number }) {
+  const qs = new URLSearchParams({ chars: String(params.chars), sourceDurationSec: String(params.sourceDurationSec) });
+  return api<CloneChainEstimate>(projectPath(projectId, `/manifest/voice-patches/estimate?${qs.toString()}`));
+}
+
+/** The same service for the legacy single-call voice-patch path (see CloneChainEstimate). */
+export function getTtsEstimate(projectId: string, params: { providerId: string; chars: number; model?: string }) {
+  const qs = new URLSearchParams({ providerId: params.providerId, chars: String(params.chars), ...(params.model ? { model: params.model } : {}) });
+  return api<CloneChainEstimate>(projectPath(projectId, `/tts-estimate?${qs.toString()}`));
+}
+
+export function getVoiceStatus(projectId: string) { return api<VoiceStatus>(projectPath(projectId, '/voice/status')); }
+export function prepareVoice(projectId: string) { return api<PrepareVoiceResponse>(projectPath(projectId, '/voice/prepare'), { method: 'POST', body: '{}' }); }
+export function getVoicePatchProgress(projectId: string, requestId: string) {
+  return api<VoicePatchProgress>(projectPath(projectId, `/manifest/voice-patches/${encodeURIComponent(requestId)}/progress`));
+}
+export function createCloneChainVoicePatch(projectId: string, input: CloneChainVoicePatchInput) {
+  return api<CloneChainVoicePatchResponse>(projectPath(projectId, '/manifest/voice-patches'), { method: 'POST', body: JSON.stringify({ mode: 'clone-chain', ...input }) });
+}
+
+/**
+ * A fresh client-side request id for one user action (D5). Must satisfy the server's
+ * ProviderRequestIdSchema: 8–128 chars, `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`.
+ *
+ * `crypto.randomUUID` is only defined in secure contexts, and the LAN story includes plain
+ * http://<ip>:4318 — so the fallback is not theoretical. It uses getRandomValues where
+ * available and only degrades to Math.random as a last resort (this id is an idempotency key,
+ * not a secret; a collision costs a 409, not a leak).
+ */
+export function newRequestId(): string {
+  const uuid = typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : null;
+  if (uuid) return `vp-${uuid}`;
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === 'function') globalThis.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  return `vp-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }

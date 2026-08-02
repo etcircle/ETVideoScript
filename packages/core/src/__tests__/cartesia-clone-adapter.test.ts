@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { usePaidTransportStubbingGlobalFetch } from './paidTransportTestSetup';
+usePaidTransportStubbingGlobalFetch();
 import { cloneCartesiaVoice } from '../providers/tts/cartesia';
 
 describe('cloneCartesiaVoice', () => {

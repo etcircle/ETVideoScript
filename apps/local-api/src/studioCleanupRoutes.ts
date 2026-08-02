@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertInside, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, readChannelFixSidecar, readSecrets, sourceChannelFixFingerprint, type ManifestV3 } from '@etvideoscript/core';
+import { assertInside, estimateAudioEnhanceCostUsd, extractAudio, extractClipAudio, ffprobeDurationSec, guardedFetch, readChannelFixSidecar, readSecrets, sourceChannelFixFingerprint, type ManifestV3 } from '@etvideoscript/core';
 import type { LocalApiRouteContext } from './routeContext';
 
 /**
@@ -194,10 +194,17 @@ export function registerStudioCleanupRoutes(ctx: LocalApiRouteContext) {
           const sourceBytes = readFileSync(sourceAudioAbs);
           const form = new FormData();
           form.append('audio', new Blob([sourceBytes as unknown as BlobPart], { type: 'audio/wav' }), 'source.wav');
-          const response = await fetch('https://api.elevenlabs.io/v1/audio-isolation', {
+          // Through the GUARDED boundary, not a bare global fetch: Studio Sound is a paid call
+          // like any other, so it must pass the same SSRF guard and the same central
+          // fail-closed VITEST gate. Previously it reached the network directly and the gate
+          // never saw it — the local testMode branch above was its only protection.
+          const response = await guardedFetch('https://api.elevenlabs.io/v1/audio-isolation', {
+            tier: 'paid',
             method: 'POST',
             headers: { 'xi-api-key': secret! },
-            body: form
+            body: form,
+            signal: new AbortController().signal,
+            timeoutMs: 5 * 60 * 1000
           });
           if (!response.ok) {
             const body = await response.text();

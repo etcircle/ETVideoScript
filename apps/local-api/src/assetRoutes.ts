@@ -52,7 +52,12 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
   }
 
   function providerRequestBodyHash(ws: string, requestId: string): string | undefined {
-    return readProviderRequests(ws).find((event: any) => event.requestId === requestId && typeof event.bodyHash === 'string')?.bodyHash;
+    return (readProviderRequests(ws).find((event: any) => event.requestId === requestId && typeof event.bodyHash === 'string') as { bodyHash?: string } | undefined)?.bodyHash;
+  }
+
+  /** STRICT variant, for the pre-call replay gate — see its call site. */
+  function providerRequestBodyHashStrict(ws: string, requestId: string): string | undefined {
+    return (readProviderRequests(ws, { strict: true }).find((event: any) => event.requestId === requestId && typeof event.bodyHash === 'string') as { bodyHash?: string } | undefined)?.bodyHash;
   }
 
 
@@ -348,10 +353,17 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
     // collisions can't share a dedup slot.
     const result = await withInFlightProviderCall(`gen:${projectId}:${requestId}:${bodyHash}`, async () => {
       const phase1 = await withProjectManifestMutex(projectId, async () => {
-        const existing = latestProviderRequest(ws, requestId);
+        // STRICT: the pre-call replay gate for a PAID media generation. A skipped ledger row
+        // reads as "never requested" and re-executes the provider; legacy rows are migrated by
+        // the strict union rather than dropped.
+        const existing = latestProviderRequest(ws, requestId, { strict: true });
         if (existing) {
-          const existingHash = providerRequestBodyHash(ws, requestId);
-          if (existingHash && existingHash !== bodyHash) throw Object.assign(new Error('requestId already exists with different bodyHash'), { statusCode: 409 });
+          const existingHash = providerRequestBodyHashStrict(ws, requestId);
+          // UNCONDITIONAL equality. Guarding on `existingHash &&` meant a record with no stored
+          // hash — which is exactly what a migrated historical row normalizes to — replayed
+          // against ANY body: a different prompt would return the previous generation's asset.
+          // A record we cannot compare is incomplete history, not a licence to match everything.
+          if (existingHash !== bodyHash) throw Object.assign(new Error(existingHash ? 'requestId already exists with different bodyHash' : 'requestId has incomplete history (no recorded body) and cannot be replayed'), { statusCode: 409 });
           const manifest = loadManifest(ws);
           const asset = manifest.assets.find((candidate: any) => candidate.providerRequestId === requestId);
           return { kind: 'early' as const, payload: { existing, asset, manifest, validation: validateWorkspaceManifest(ws) } };

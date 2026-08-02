@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { usePaidTransportStubbingGlobalFetch } from './paidTransportTestSetup';
+usePaidTransportStubbingGlobalFetch();
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { latestProviderRequest, readProviderRequests, setProviderSecret, upsertProvider } from '@etvideoscript/core';
@@ -58,6 +60,25 @@ describe('generation asset routes', () => {
       const asset = body.manifest.assets.find((candidate: any) => candidate.providerRequestId === 'provider_mock_image');
       expect(asset).toMatchObject({ provenance: 'generated' });
       expect(existsSync(join(root, 'episode-001', asset.path))).toBe(true);
+    } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('refuses to replay a historical row with no recorded body, instead of matching ANY body', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-generation-'));
+    process.env.HOME = root;
+    const app = createApp(config(root));
+    try {
+      await createProject(app);
+      // A row from an older writer: it names the request but records no bodyHash. Migration
+      // normalizes that to '', and a guard of the form `existingHash && existingHash !== hash`
+      // then compares nothing — so a COMPLETELY DIFFERENT prompt would replay against this id
+      // and hand back the previous generation's asset.
+      writeFileSync(join(root, 'episode-001/logs/provider-requests.jsonl'),
+        `${JSON.stringify({ requestId: 'provider_history_gap', status: 'succeeded', createdAt: new Date().toISOString(), provider: 'image-gen.mock', operationId: '' })}\n`);
+
+      const response = await app.inject({ method: 'POST', url: '/api/projects/episode-001/assets/generations', payload: { kind: 'image-gen', prompt: 'a completely different prompt', provider: 'mock', requestId: 'provider_history_gap' } });
+      expect(response.statusCode).toBe(409);
+      expect(JSON.parse(response.body).error).toMatch(/incomplete history/);
     } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
   });
 

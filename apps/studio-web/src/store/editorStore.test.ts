@@ -11,7 +11,9 @@ vi.mock('../lib/api', async (importOriginal) => {
     getProviderRequestSummary: vi.fn(),
     createVoicePatch: vi.fn(),
     createGeneration: vi.fn(),
-    uploadRecordingAsset: vi.fn()
+    uploadRecordingAsset: vi.fn(),
+    // refresh() re-derives the voice status; stub it so these tests never touch the network.
+    getVoiceStatus: vi.fn(async () => ({ state: 'none' as const }))
   };
 });
 

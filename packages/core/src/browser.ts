@@ -25,3 +25,4 @@ export { projectCaptions as projectCaptionsV3, captionsToSrt as captionsToSrtV3,
 export { deriveEditedScriptFromTimeMap as deriveEditedScriptFromTimeMapV3, type V3EditedScript, type V3EditedScriptToken } from './transcript/edited-script';
 export { derivePreviewScriptFromTimeMap as derivePreviewScriptFromTimeMapV3, type V3PreviewScript, type V3PreviewScriptToken, type V3PreviewScriptWordToken, type V3PreviewScriptReplacementToken } from './transcript/preview-script';
 export { selectEnrollmentSentences, enrollmentCorpus, type EnrollmentSentence } from './enrollmentCorpus';
+export { isTerminalJobStatus, type JobView, type JobStageView, type JobStatus } from './jobView';

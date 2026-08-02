@@ -1,10 +1,19 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { usePaidTransport } from './paidTransportTestSetup';
+import { realDialerTransportForNetworkTests } from '../network/paidCallGate';
 
 const lookupMock = vi.hoisted(() => vi.fn((hostname: string, _options: unknown, callback: any) => callback(null, hostname, 4)));
 vi.mock('node:dns', () => ({ lookup: lookupMock }));
 import { SettingsError } from '../providerSettings';
 import { guardedFetch, isPublicGlobalUnicastIp } from '../network/guardedFetch';
+
+// This suite tests the SSRF guard ITSELF, so its requests must actually enter the dialer to be
+// rejected by it. That is an EXPLICIT injected transport (the real dialer), not an env bypass:
+// visible at the callsite, scoped to this file, and impossible for an unrelated suite to
+// inherit. Every URL here is loopback, a non-routable literal, or a DNS-pinned private address,
+// so no paid endpoint is reachable.
+usePaidTransport(realDialerTransportForNetworkTests);
 
 afterEach(() => {
   vi.unstubAllGlobals();

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { usePaidTransportStubbingGlobalFetch } from './paidTransportTestSetup';
+usePaidTransportStubbingGlobalFetch();
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

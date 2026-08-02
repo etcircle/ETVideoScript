@@ -8,6 +8,12 @@ import { spawnSync } from 'node:child_process';
  */
 export function run(command: string, args: string[], cwd?: string) {
   const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
+  // spawnSync sets `error` (and leaves status null) when the binary cannot be LAUNCHED — ENOENT
+  // for a missing ffprobe, EACCES, EMFILE. That is local infrastructure breakage, and it must be
+  // distinguishable from "the process ran and rejected the file": callers that treat a decode
+  // failure as a degraded provider payload would otherwise silently map a missing ffprobe to
+  // "the provider returned 0 ms". Same wording audioClip.ts already uses for its own spawns.
+  if (result.error) throw new Error(`${command} could not be spawned: ${result.error.message}`, { cause: result.error });
   if (result.status !== 0) throw new Error(`${command} failed: ${result.stderr || result.stdout}`);
   return result.stdout;
 }

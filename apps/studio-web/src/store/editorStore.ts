@@ -2,7 +2,7 @@
 
 import { create } from 'zustand';
 import type { AssetV3, ClipV3, ManifestV3, OperationV3, OutputV3, ProviderRequestCostSummary, TrackV3 } from '@etvideoscript/core/browser';
-import { addAsset as addAssetApi, addClip as addClipApi, addOutput as addOutputApi, addTrack as addTrackApi, cancelJob as cancelJobApi, createGeneration as createGenerationApi, createOperation as createOperationApi, createVoicePatch as createVoicePatchApi, detachAudio as detachAudioApi, disableOperation as disableOperationApi, disableStudioCleanup as disableStudioCleanupApi, getProject, getProjectDiagnostics, getProjectJob, getProjectJobs, getProviderRequestSummary, patchAsset as patchAssetApi, patchClip as patchClipApi, patchOperation as patchOperationApi, patchOutput as patchOutputApi, patchTrack as patchTrackApi, proposeOutputs as proposeOutputsApi, removeAsset as removeAssetApi, removeClip as removeClipApi, removeOutput as removeOutputApi, removeTrack as removeTrackApi, reorderTracks as reorderTracksApi, runStudioCleanup as runStudioCleanupApi, setBrandPack as setBrandPackApi, speechToSpeechVoicePatch as speechToSpeechVoicePatchApi, triggerRenderDraft as triggerRenderDraftApi, triggerTranscribe as triggerTranscribeApi, uploadRecordingAsset as uploadRecordingAssetApi, uploadVideoAsset as uploadVideoAssetApi, type AddTrackInput, type CreateGenerationInput, type CreateOperationInput, type CreateVoicePatchInput, type Diagnostics, type GenerationKind, type Job, type OperationResponse, type ProjectDetail, type StructureResponse, type TranscriptDoc, type UpdateOperationInput } from '../lib/api';
+import { ApiError, addAsset as addAssetApi, addClip as addClipApi, addOutput as addOutputApi, addTrack as addTrackApi, cancelJob as cancelJobApi, createCloneChainVoicePatch as createCloneChainVoicePatchApi, createGeneration as createGenerationApi, createOperation as createOperationApi, createVoicePatch as createVoicePatchApi, detachAudio as detachAudioApi, disableOperation as disableOperationApi, disableStudioCleanup as disableStudioCleanupApi, getProject, getProjectDiagnostics, getProjectJob, getProjectJobs, getProviderRequestSummary, getVoiceStatus as getVoiceStatusApi, patchAsset as patchAssetApi, patchClip as patchClipApi, patchOperation as patchOperationApi, patchOutput as patchOutputApi, patchTrack as patchTrackApi, prepareVoice as prepareVoiceApi, proposeOutputs as proposeOutputsApi, removeAsset as removeAssetApi, removeClip as removeClipApi, removeOutput as removeOutputApi, removeTrack as removeTrackApi, reorderTracks as reorderTracksApi, runStudioCleanup as runStudioCleanupApi, setBrandPack as setBrandPackApi, speechToSpeechVoicePatch as speechToSpeechVoicePatchApi, triggerRenderDraft as triggerRenderDraftApi, triggerTranscribe as triggerTranscribeApi, uploadRecordingAsset as uploadRecordingAssetApi, uploadVideoAsset as uploadVideoAssetApi, type AddTrackInput, type CloneChainVoicePatchInput, type CloneChainVoicePatchResponse, type CreateGenerationInput, type CreateOperationInput, type CreateVoicePatchInput, type Diagnostics, type GenerationKind, type Job, type OperationResponse, type ProjectDetail, type StructureResponse, type TranscriptDoc, type UpdateOperationInput, type VoiceStatus } from '../lib/api';
 import { latestRenderDraftJob } from './selectors';
 
 export type ActivePanel = 'ai' | 'suggestions' | 'manifest' | 'clips' | 'inspect' | 'elements' | 'media' | null;
@@ -70,6 +70,17 @@ type DataState = {
   acknowledgedRenderJobId: string | null;
   /** Transient UI status for the Studio Sound card. Not persisted. */
   studioSoundStatus: StudioSoundStatus;
+  /**
+   * S1b: the project's prepared voice clone, as GET /voice/status derives it from durable
+   * facts (voices library + clone reservation + latest prepare job + the D6 freshness
+   * contract). Never inferred locally — a restart is exactly when 'unknown-outcome' must
+   * become visible, and only the server can see that.
+   */
+  voice: VoiceStatus;
+  /** Disclosure text from the last prepare POST (D7). Cleared on project switch. */
+  voicePrepareDisclosure: string | null;
+  /** True between the prepare POST and the first status that reflects it (optimistic). */
+  voicePreparing: boolean;
   // Timestamp of the last manifest mutation in this session — set to Date.now() on every
   // applyStructure/applyOperation. The auto-render lifecycle uses this as a "the user has
   // been actively editing here" signal: refresh() only schedules a catch-up auto-render
@@ -131,6 +142,30 @@ type Actions = {
    * will reuse the cached asset (no paid call needed).
    */
   disableStudioSound: () => Promise<void>;
+  /** Re-read GET /voice/status. Safe to call often; never mutates server state. */
+  refreshVoiceStatus: () => Promise<VoiceStatus | null>;
+  /**
+   * POST /voice/prepare — queue (or join) the prepare-voice job, then poll it to a terminal.
+   *
+   * `auto` marks the EAGER kick after Studio Sound (D7): it re-reads the status first and
+   * declines to start when a clone is ready, one is already preparing, or the last attempt
+   * ended in 'unknown-outcome' — ⟨F2⟩ forbids auto-retrying an unknown paid outcome, only an
+   * explicit user re-prepare may bill again.
+   */
+  prepareVoice: (opts?: { auto?: boolean }) => Promise<{ costDisclosure?: string; cached?: boolean } | null>;
+  /**
+   * D9 clone-chain patch. Unlike createVoicePatch this THROWS on failure (the typed 409s —
+   * clone-not-ready / clone-stale / clone-unknown-outcome / paid-step-unknown-outcome — drive
+   * different UI affordances and must reach the caller as ApiError, not a store error string).
+   *
+   * `supersedeOperationIds` are the type-over mute ops this generation replaces. They are
+   * disabled HERE, against the project the POST was issued for, because that cleanup is
+   * required regardless of where the user has navigated to meanwhile.
+   *
+   * Returns `status: 'stale'` when the user left the project mid-generation: the result is real
+   * and was persisted server-side, but the caller must not run UI side effects for it.
+   */
+  createCloneChainVoicePatch: (input: CloneChainVoicePatchInput & { supersedeOperationIds?: string[] }) => Promise<{ status: 'applied' | 'stale'; projectId: string; response: CloneChainVoicePatchResponse }>;
   createGeneration: (kind: GenerationKind, prompt: string, opts?: Omit<CreateGenerationInput, 'kind' | 'prompt'>) => Promise<void>;
   updateOperation: (operationId: string, patch: UpdateOperationInput) => Promise<void>;
   approveOperation: (operationId: string) => Promise<void>;
@@ -261,6 +296,60 @@ function cancelAutoRender() {
     clearTimeout(autoRenderTimer);
     autoRenderTimer = null;
   }
+}
+
+/**
+ * The typed preflight failures POST /voice/prepare answers with (voiceRoutes.ts
+ * VoicePrepareErrorCode). These are states of the project, not failures of the request, so the
+ * voice chip owns them; anything OUTSIDE this set is a genuine error and must surface.
+ */
+const VOICE_PREFLIGHT_ERROR_CODES = new Set([
+  'transcript-not-word-accurate',
+  'cleaned-source-unavailable',
+  'multi-clip-unsupported',
+  'insufficient-clean-windows',
+  'voice-slot-limit'
+]);
+
+// Generation counter for the prepare-voice poller. Bumped on every hydrate/load so a poll
+// loop started for project A stops the moment the user navigates to project B — the loop is
+// an await chain, not a timer, so there is nothing to clearTimeout.
+let voicePollSeq = 0;
+
+/**
+ * Poll a prepare-voice job to its terminal, mirroring pollJobToCompletion but reading BOTH
+ * sources: the job (for the decoding → selecting-windows → cloning stages the chip shows) and
+ * /voice/status (the authoritative state — it also runs restart reconciliation, so it is what
+ * turns a dangling 'preparing' into 'unknown-outcome').
+ *
+ * The job may 404 briefly (the reservation is written before the queued record is visible to a
+ * fresh read on some filesystems), so a job read failure is never fatal to the loop.
+ */
+async function pollVoicePreparation(projectId: string, jobId: string | null, set: (partial: Partial<EditorStore>) => void, get: () => EditorStore) {
+  const seq = voicePollSeq;
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    await delay(1500);
+    if (seq !== voicePollSeq || get().projectId !== projectId) return;
+    if (jobId) {
+      try {
+        const response = await getProjectJob(projectId, jobId);
+        if (seq !== voicePollSeq || get().projectId !== projectId) return;
+        set({ jobs: upsertJob(get().jobs, response.job) });
+      } catch { /* job log not readable yet — the status below is the authority anyway */ }
+    }
+    let status: VoiceStatus;
+    try {
+      status = await getVoiceStatusApi(projectId);
+    } catch {
+      continue;
+    }
+    if (seq !== voicePollSeq || get().projectId !== projectId) return;
+    set({ voice: status, voicePreparing: status.state === 'preparing' });
+    if (status.state !== 'preparing') return;
+  }
+  // Gave up watching (10 minutes). Leave the last known state alone rather than inventing a
+  // terminal the server never reported — a paid clone may still be in flight.
+  if (seq === voicePollSeq && get().projectId === projectId) set({ voicePreparing: false });
 }
 
 // Schedules a debounced render-draft for the active project. Coalesces multiple manifest
@@ -439,6 +528,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   notice: null,
   acknowledgedRenderJobId: null,
   studioSoundStatus: 'idle' as StudioSoundStatus,
+  voice: { state: 'none' } as VoiceStatus,
+  voicePrepareDisclosure: null,
+  voicePreparing: false,
   lastAutoEditAt: null,
   autoRenderEnabled: true,
   previewKindLockedByUser: false,
@@ -478,6 +570,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     // Different project than whatever was loaded previously — drop any pending auto-render
     // timer so it doesn't fire against the new project's state.
     cancelAutoRender();
+    // …and stop any in-flight prepare-voice poll, which is scoped to the OLD project.
+    voicePollSeq += 1;
     set({
       projectId,
       project: initial.project,
@@ -497,6 +591,11 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       // already has an approved studio-cleanup shows the applied/revertable state
       // (not "run") on load (codex P2).
       studioSoundStatus: (initial.manifest?.studioCleanup?.status === 'approved' ? 'on' : 'idle') as StudioSoundStatus,
+      // Voice state is server-derived; start from 'none' and let refresh() fill it in rather
+      // than guessing from the manifest (the clone lives in the voices library, not here).
+      voice: { state: 'none' },
+      voicePrepareDisclosure: null,
+      voicePreparing: false,
       lastAutoEditAt: null,
       previewKindLockedByUser: false,
       // Default to DRAFT whenever a draft has ever been rendered for this project (regardless
@@ -543,9 +642,11 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const detail = await getProject(projectId);
+      voicePollSeq += 1;
       set({ projectId, project: detail.project, manifest: detail.manifest, transcript: detail.transcript, jobs: detail.jobs || [], proposedOutputs: [], loading: false,
         // Reflect any persisted studio-cleanup on project switch (codex P2).
-        studioSoundStatus: (detail.manifest?.studioCleanup?.status === 'approved' ? 'on' : 'idle') as StudioSoundStatus });
+        studioSoundStatus: (detail.manifest?.studioCleanup?.status === 'approved' ? 'on' : 'idle') as StudioSoundStatus,
+        voice: { state: 'none' }, voicePrepareDisclosure: null, voicePreparing: false });
       await get().refresh();
     } catch (error) {
       set({ loading: false, error: error instanceof Error ? error.message : String(error) });
@@ -560,7 +661,17 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         getProjectDiagnostics(projectId).catch((): { diagnostics: Diagnostics | null } => ({ diagnostics: null })),
         getProviderRequestSummary(projectId).catch(() => ({ providerRequests: [] as Array<Record<string, unknown>>, costSummary: null }))
       ]);
+      // PROJECT GUARD, before the first mutation and not after the last one. These responses
+      // describe the project that was open when the request went out; if the user has since
+      // navigated, writing them would put project A's manifest, jobs and diagnostics into
+      // project B's store. Guarding here protects every caller of refresh(), not just the one
+      // that noticed.
+      if (get().projectId !== projectId) return;
       set({ project: detail.project, manifest: detail.manifest, transcript: detail.transcript, jobs: detail.jobs || [], diagnostics: diag.diagnostics, providerRequests: provider.providerRequests || [], costSummary: provider.costSummary || null, error: null });
+      // Voice freshness is a function of the manifest's studioCleanup generation (D6), so the
+      // one place that reloads the manifest is the right place to re-derive it. Fire-and-forget:
+      // a voice-status failure must never fail the whole refresh.
+      void get().refreshVoiceStatus();
       // Hermes browser smoke 2026-05-24: hydrate sets previewKind from `initial.jobs`, which
       // may be missing the historical render-draft job if the jobs log was pruned across
       // server restarts. diag.diagnostics.files.draft.exists is the authoritative on-disk
@@ -596,6 +707,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         scheduleAutoRender(get);
       }
     } catch (error) {
+      if (get().projectId !== projectId) return;
       set({ error: error instanceof Error ? error.message : String(error) });
     }
   },
@@ -606,12 +718,14 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       getProjectDiagnostics(projectId).catch((): { diagnostics: Diagnostics | null } => ({ diagnostics: null })),
       getProviderRequestSummary(projectId).catch(() => ({ providerRequests: [] as Array<Record<string, unknown>>, costSummary: null }))
     ]);
+    if (get().projectId !== projectId) return;
     set({ diagnostics: diag.diagnostics, providerRequests: provider.providerRequests || [], costSummary: provider.costSummary || null });
   },
   async pollJobs() {
     const { projectId } = get();
     if (!projectId) return;
     const jobs = await getProjectJobs(projectId);
+    if (get().projectId !== projectId) return;
     set({ jobs: jobs.jobs });
   },
   async triggerRenderDraft() {
@@ -700,6 +814,11 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       set({ manifest: response.manifest, studioSoundStatus: 'on', lastAutoEditAt: Date.now() });
       void get().refreshDerived();
       scheduleAutoRender(get);
+      // D7 EAGER KICK: the clone trains on the cleaned recording, so a fresh cleanup is exactly
+      // when the voice must be (re)prepared. Fire-and-forget — the CleanupStrip voice chip owns
+      // the disclosure and the progress; a prepare failure must not turn a successful Studio
+      // Sound run into an error. prepareVoice({auto}) itself decides whether billing is allowed.
+      void get().prepareVoice({ auto: true });
       return { costDisclosure: response.costDisclosure, cached: response.cached };
     } catch (error) {
       set({ studioSoundStatus: 'error', error: error instanceof Error ? error.message : String(error) });
@@ -713,10 +832,103 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       const response = await disableStudioCleanupApi(projectId);
       set({ manifest: response.manifest, studioSoundStatus: 'idle', lastAutoEditAt: Date.now() });
       void get().refreshDerived();
+      void get().refreshVoiceStatus();
       scheduleAutoRender(get);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     }
+  },
+  async refreshVoiceStatus() {
+    const { projectId } = get();
+    if (!projectId) return null;
+    try {
+      const status = await getVoiceStatusApi(projectId);
+      // Late-response guard: a status for the project we just navigated away from must not
+      // land on the new project's chip.
+      if (get().projectId !== projectId) return null;
+      set({ voice: status, ...(status.state === 'preparing' ? {} : { voicePreparing: false }) });
+      return status;
+    } catch {
+      // The status endpoint is a read of durable state; a transient failure means "unknown",
+      // not "none" — leave the last known value in place.
+      return null;
+    }
+  },
+  async prepareVoice(opts) {
+    const { projectId } = get();
+    if (!projectId) return null;
+    const auto = opts?.auto === true;
+    if (auto) {
+      // FAIL CLOSED on an unreadable status. The local `voice` value is 'none' right after
+      // hydration, so falling back to it would let a single failed GET turn an eager kick into
+      // a paid clone for a project whose DURABLE state is 'unknown-outcome' — precisely the
+      // re-bill ⟨F2⟩ forbids. Only an authoritative answer may authorize an automatic call;
+      // the user can still prepare explicitly.
+      const current = await get().refreshVoiceStatus();
+      if (!current) return null;
+      // ⟨F2⟩: an unknown paid outcome is NEVER auto-retried — only an explicit user
+      // re-prepare may bill again. 'ready'/'preparing' need no second call either.
+      if (current.state === 'ready' || current.state === 'preparing' || current.state === 'unknown-outcome') return null;
+      if (get().voicePreparing) return null;
+    }
+    set({ voicePreparing: true, error: null });
+    try {
+      const response = await prepareVoiceApi(projectId);
+      if (get().projectId !== projectId) return null;
+      if (response.status) {
+        // 200 + cached: the clone already existed and nothing was billed.
+        set({ voice: response.status, voicePreparing: false, voicePrepareDisclosure: null });
+        return { cached: true };
+      }
+      const jobId = response.job?.jobId ?? null;
+      set({
+        voice: { state: 'preparing', ...(jobId ? { jobId } : {}) },
+        voicePreparing: true,
+        ...(response.costDisclosure ? { voicePrepareDisclosure: response.costDisclosure } : {})
+      });
+      void pollVoicePreparation(projectId, jobId, set, get);
+      return { ...(response.costDisclosure ? { costDisclosure: response.costDisclosure } : {}) };
+    } catch (error) {
+      if (get().projectId !== projectId) return null;
+      set({ voicePreparing: false });
+      // ONLY a recognized 409 preflight (no transcript, Studio Sound not run, …) is absorbed
+      // into the chip: /voice/status carries the same errorCode + message, so the chip already
+      // explains it. Everything else — auth, network, 5xx, an unrecognized code — is a real
+      // failure of an action the user (or the eager kick) took, and silently swallowing it
+      // behind an unchanged chip is how a broken key looks like "nothing happened".
+      const preflight = error instanceof ApiError && error.status === 409 && !!error.errorCode && VOICE_PREFLIGHT_ERROR_CODES.has(error.errorCode);
+      void get().refreshVoiceStatus();
+      if (!preflight) set({ error: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  },
+  async createCloneChainVoicePatch({ supersedeOperationIds, ...input }) {
+    // Pinned at POST time: a generation can outlive the project the user is looking at, and
+    // refreshing + scheduling a render for whatever project is CURRENT when it resolves would
+    // both hide the result and kick an unrelated render.
+    const projectIdAtCall = get().projectId;
+    const response = await createCloneChainVoicePatchApi(projectIdAtCall, input);
+    // REQUIRED cleanup, done here and addressed to the project the patch belongs to. The
+    // type-over mute ops this generation replaces must be disabled even if the user has
+    // navigated away — and a caller-side `disableOperation` would resolve against whatever
+    // project is current, applying project A's operation ids to project B.
+    for (const operationId of supersedeOperationIds ?? []) {
+      try { await disableOperationApi(projectIdAtCall, operationId, 'Replaced by generated voice patch'); }
+      catch { /* the patch landed; a stranded mute is recoverable and must not fail the result */ }
+    }
+    if (get().projectId !== projectIdAtCall) {
+      // STALE: the result is real but it belongs to a project the user has left. Report it so
+      // the caller performs no further UI side effects rather than applying them here.
+      return { status: 'stale' as const, projectId: projectIdAtCall, response };
+    }
+    // ⟨Q1⟩: the clone-chain terminal is finalized BEFORE the manifest mutation, so the response
+    // deliberately carries no manifest. Reload it (and the render freshness that follows from
+    // it) rather than patching the op in locally from a partial shape.
+    set({ lastAutoEditAt: Date.now(), undoneOpIds: [] });
+    await get().refresh();
+    if (get().projectId !== projectIdAtCall) return { status: 'stale' as const, projectId: projectIdAtCall, response };
+    scheduleAutoRender(get);
+    return { status: 'applied' as const, projectId: projectIdAtCall, response };
   },
   seek(time) { set({ currentTime: Math.max(0, time) }); },
   setPlaying(playing) { set({ playing }); },

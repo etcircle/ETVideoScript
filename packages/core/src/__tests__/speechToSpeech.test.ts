@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { usePaidTransportStubbingGlobalFetch } from './paidTransportTestSetup';
+usePaidTransportStubbingGlobalFetch();
 import { speechToSpeechElevenlabs } from '../providers/tts/elevenlabs';
 
 const originalFetch = globalThis.fetch;

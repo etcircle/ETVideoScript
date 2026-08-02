@@ -2,6 +2,7 @@ import { lookup as dnsLookup } from 'node:dns';
 import { isIP } from 'node:net';
 import { Agent } from 'undici';
 import { SettingsError, type ProviderTier } from '../providerSettings';
+import { PaidCallBlockedError, resolvePaidTransport } from './paidCallGate';
 
 export type GuardedFetchOptions = Omit<RequestInit, 'redirect'> & {
   tier: ProviderTier;
@@ -196,6 +197,11 @@ function mergeSignals(parent: AbortSignal | undefined, timeoutSignal: AbortSigna
 }
 
 export async function guardedFetch(input: string | URL, options: GuardedFetchOptions): Promise<Response> {
+  // S1b D8: single fail-closed boundary for PAID calls. Every paid provider call (TTS,
+  // speech-to-speech, voice clone, Studio Sound isolation) funnels through here, so resolving
+  // the transport here gates all of them. Under VITEST this THROWS unless a test explicitly
+  // installed a transport — there is no env bypass.
+  const transport = options.tier === 'paid' ? resolvePaidTransport(String(input)) : null;
   let current: URL;
   try { current = new URL(String(input)); }
   catch { throw new SettingsError('invalid_base_url', 'Provider baseUrl is invalid.'); }
@@ -227,9 +233,16 @@ export async function guardedFetch(input: string | URL, options: GuardedFetchOpt
         // Node's built-in fetch still accepts undici's Agent as the dispatcher
         // (a documented public API), so the SSRF DNS guard below remains
         // effective. Tests can still mock globalThis.fetch directly.
-        const fetchImpl = globalThis.fetch.bind(globalThis);
+        // Paid calls use the gate-resolved transport (production: the platform fetch; under
+        // VITEST: the explicitly installed test transport). Local-tier calls are not money and
+        // keep using the platform fetch directly.
+        const fetchImpl = transport ?? globalThis.fetch.bind(globalThis);
         response = await (fetchImpl as any)(current, { ...init, redirect: 'manual', signal: mergeSignals(signal ?? undefined, controller.signal), dispatcher: agent }) as unknown as Response;
       } catch (err: any) {
+        // The paid-call gate must surface AS ITSELF: laundering it into
+        // 'provider_unreachable' would read as a flaky network in test output and hide the
+        // fact that a paid path was reached without an installed transport.
+        if (err instanceof PaidCallBlockedError) throw err;
         if (err instanceof SettingsError) throw err;
         if (err?.cause instanceof SettingsError) throw err.cause;
         if (err?.name === 'AbortError' || controller.signal.aborted) throw new SettingsError('provider_unreachable', 'Provider call timed out.');

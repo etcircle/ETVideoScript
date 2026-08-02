@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { paidTransportFromGlobalFetch, realDialerTransportForNetworkTests, setPaidTransportForTests } from '@etvideoscript/core';
+import { usePaidTransportStubbingGlobalFetch } from './paidTransportTestSetup';
+usePaidTransportStubbingGlobalFetch();
 
 vi.mock('node:dns', () => ({
   lookup: vi.fn((hostname: string, options: any, callback: (...args: any[]) => void) => {
@@ -394,6 +397,10 @@ describe('settings API routes', () => {
     const oldHome = process.env.HOME;
     process.env.HOME = home;
     const app = createApp(config(root));
+    // The SSRF guard under test lives inside guardedFetch's paid path, so these requests must
+    // reach the real dialer to be rejected by it — installed explicitly for this case, then
+    // handed back to the file's default stub transport.
+    setPaidTransportForTests(realDialerTransportForNetworkTests());
     try {
       await app.inject({ method: 'POST', url: '/api/settings/providers', payload: { id: 'stt.public-paid', kind: 'stt', name: 'public-paid', tier: 'paid', enabled: true, baseUrl: 'http://private.test' } });
       await app.inject({ method: 'POST', url: '/api/settings/providers', payload: { id: 'stt.mapped-paid', kind: 'stt', name: 'mapped-paid', tier: 'paid', enabled: true, baseUrl: 'http://mapped.test' } });
@@ -407,7 +414,10 @@ describe('settings API routes', () => {
       const localHit = await app.inject({ method: 'POST', url: '/api/settings/providers/stt.local-loopback/test' });
       expect([400, 502]).toContain(localHit.statusCode);
       expect(JSON.parse(localHit.body).error.code).not.toBe('ssrf_blocked');
-    } finally { await app.close(); process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+    } finally {
+      setPaidTransportForTests(paidTransportFromGlobalFetch());
+      await app.close(); process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('blocks .local and redirect-to-private for paid provider tests', async () => {
@@ -501,6 +511,9 @@ describe('settings API routes', () => {
     const oldHome = process.env.HOME;
     process.env.HOME = home;
     const app = createApp(config(root));
+    // Same as above: the guard under test only runs inside the real dialer, so it is installed
+    // explicitly for this case. Every address below is non-routable.
+    setPaidTransportForTests(realDialerTransportForNetworkTests());
     try {
       const cases = [
         ['stt.cgnat-paid', 'cgnat-paid', 'http://cgnat.test'],
@@ -514,6 +527,9 @@ describe('settings API routes', () => {
         expect(response.statusCode).toBe(400);
         expect(JSON.parse(response.body).error.code).toBe('ssrf_blocked');
       }
-    } finally { await app.close(); process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+    } finally {
+      setPaidTransportForTests(paidTransportFromGlobalFetch());
+      await app.close(); process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true });
+    }
   });
 });

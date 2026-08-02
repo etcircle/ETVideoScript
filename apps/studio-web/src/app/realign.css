@@ -348,6 +348,18 @@
   animation: spin 0.9s linear infinite;
 }
 
+/* S1b · prepared-voice chip — same card language as .studio-run, one step quieter. */
+.studio-note {
+  margin: 8px 2px 10px;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+.studio-run.voice-prepare { margin-bottom: 2px; }
+.studio-run.voice-prepare.attention { border-color: var(--danger); background: color-mix(in oklab, var(--danger) 6%, var(--paper)); }
+.studio-run.voice-prepare.attention .studio-glyph { color: var(--danger); border-color: var(--danger); }
+.studio-run.voice-prepare:disabled { cursor: default; }
+
 /* ════════════════════════════════════════════════════════════════
    CHANGES panel — referenceable history of applied edits
    ════════════════════════════════════════════════════════════════ */

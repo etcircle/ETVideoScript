@@ -77,6 +77,7 @@ import { registerManifestRoutes } from './manifestRoutes';
 import { registerStructureRoutes } from './structureRoutes';
 import { registerJobRoutes } from './jobRoutes';
 import { registerStudioCleanupRoutes } from './studioCleanupRoutes';
+import { registerVoiceRoutes, reconcileVoicePreparation, type PrepareVoiceDeps } from './voiceRoutes';
 import type { LocalApiRouteContext } from './routeContext';
 import { createInFlightProviderCalls } from './inFlightProviderCalls';
 
@@ -170,6 +171,13 @@ function voicePatchDurationWarning(generated: number, requested: number) {
   return Math.abs(deltaSec) > threshold ? { generated, requested, deltaSec } : undefined;
 }
 
+/**
+ * ⟨Q3⟩ FROZEN v1 canonicalizer. Untagged (bare hex) bodyHashes in existing workspaces were
+ * produced by exactly this function; comparing them with anything else would turn every legacy
+ * record into a spurious 409. It is therefore frozen: bug-for-bug, including the `clipId`
+ * omission that ⟨R2⟩ fixes in v2. New records are written by the tagged v2 canonicalizer
+ * (voicePatchChain.cloneChainBodyHash) and are recognised by their `v2:` prefix.
+ */
 function providerBodyHash(input: { text: string; start: number; end: number; provider: string; voice: string; language: string; model?: string; granularity?: string; cloneScope?: string; referenceRange?: { clipId: string; start: number; end: number } }): string {
   return createHash('sha256').update(JSON.stringify({
     text: input.text.trim(),
@@ -383,10 +391,28 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function createApp(config: ApiConfig = loadConfig()) {
+/**
+ * Test seams. Production passes nothing: every paid boundary then resolves through the provider
+ * engine, which the D8 gate fails closed under VITEST. Tests inject fakes here explicitly —
+ * that is the whole contract (no test ever needs, or is allowed, a real paid call).
+ */
+export interface LocalApiDeps {
+  prepareVoice?: PrepareVoiceDeps;
+  cloneChainTransports?: import('@etvideoscript/core').PatchTransports;
+  /**
+   * Test seam: kill the Phase-3 commit at one of its four windows so the crash-consistency
+   * protocol can be exercised against a real restart rather than asserted by inspection.
+   */
+  commitCrashAt?: import('./voicePatchChain').CommitCrashWindow;
+}
+
+export function createApp(config: ApiConfig = loadConfig(), deps: LocalApiDeps = {}) {
   const app = Fastify({ logger: true });
   const runningByProjectAndType = new Set<string>();
   const cancelledJobs = new Set<string>();
+  // Jobs this PROCESS is running. Reconciliation treats anything else in a non-terminal state
+  // as dangling — which after a restart is exactly right.
+  const liveJobIds = new Set<string>();
   const projectManifestMutex = new Map<string, Promise<unknown>>();
   const maxUploadBytes = Number.parseInt((process.env.ETVS_MAX_UPLOAD_BYTES || '2_147_483_648').replace(/_/g, ''), 10);
 
@@ -757,10 +783,43 @@ export function createApp(config: ApiConfig = loadConfig()) {
   };
   registerProjectRoutes(routeContext);
   registerAssetRoutes(routeContext);
-  registerManifestRoutes(routeContext);
+  const manifestRoutes = registerManifestRoutes(routeContext, deps.cloneChainTransports, deps.commitCrashAt);
   registerStructureRoutes(routeContext);
+  registerVoiceRoutes(routeContext, liveJobIds, cancelledJobs, deps.prepareVoice ?? {});
   registerJobRoutes(routeContext, cancelledJobs);
   registerStudioCleanupRoutes(routeContext);
+
+  /**
+   * Startup recovery, AWAITED and MUTEX-PROTECTED (onReady runs before the first request is
+   * served, so nothing can interleave with it).
+   *
+   * Two jobs, both per project:
+   *   • prepare-voice reconciliation — nothing is live yet, so any reservation or job still in a
+   *     non-terminal state belongs to a previous process and must reach a terminal, or
+   *     /voice/status sticks at 'preparing' forever.
+   *   • commit-marker recovery — a crash mid-commit leaves a proposed op plus a pending marker
+   *     that only a retry of that exact requestId would ever clear. Completing them here means
+   *     an abandoned generation cannot strand an operation indefinitely.
+   *
+   * Both mutate durable state that the CAS helpers assume is serialized on the project mutex,
+   * so both take it. Best-effort per project: an unreadable workspace must not stop the server
+   * from starting, but it IS logged rather than swallowed.
+   */
+  app.addHook('onReady', async () => {
+    for (const project of listProjects(config.workspaceRoot)) {
+      const projectId = project.projectId;
+      try {
+        await withProjectManifestMutex(projectId, async () => {
+          reconcileVoicePreparation(workspace(projectId), projectId, liveJobIds);
+          const recovered = manifestRoutes.recoverProjectCommitMarkers(projectId)
+            .filter((entry) => entry.outcome !== 'none' && entry.outcome !== 'recovered');
+          if (recovered.length) app.log.warn({ projectId, recovered }, 'Pending voice-patch commit markers need attention');
+        });
+      } catch (err) {
+        app.log.warn({ projectId, err: errorMessage(err) }, 'Startup voice recovery failed for project');
+      }
+    }
+  });
 
   app.register(async (wsApp) => {
     await wsApp.register(websocket);

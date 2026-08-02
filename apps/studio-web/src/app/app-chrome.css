@@ -401,17 +401,67 @@
 .voice-patch-picker select {
   width: 100%;
 }
+/* These land on <p> elements inside .tp-body, whose `.tp-body p` rule (0,1,1)
+   outranks a bare class (0,1,0) for color/font-size — the compound selectors
+   (0,2,1) keep the intended typography winning. */
 .voice-cost,
-.voice-cap-error {
+.voice-cap-error,
+.tp-body p.voice-cost,
+.tp-body p.voice-cap-error {
   margin: 0;
   font-size: 0.76rem;
 }
-.voice-cap-error {
+.voice-cap-error,
+.tp-body p.voice-cap-error {
   color: var(--danger);
 }
 .voice-patch-actions {
   display: flex;
   gap: 6px;
+}
+
+/* ─── S1b clone chain: the collapsed "your voice" confirm ──────────────────── */
+/* Stacked, not the legacy auto-fit grid — there are no side-by-side selects left. */
+.voice-patch-picker.chain {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.voice-chain-head,
+.tp-body p.voice-chain-head {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.86rem;
+  color: var(--ink);
+}
+.voice-chain-glyph {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: var(--radius-md, 6px);
+  border: 1px solid var(--line-strong);
+  background: var(--paper-2);
+  color: var(--accent-text);
+  font-size: 0.8rem;
+}
+.voice-chain-steps,
+.tp-body p.voice-chain-steps {
+  margin: 0;
+  display: flex;
+  gap: 10px;
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+.voice-chain-step.running { color: var(--accent-text); }
+.voice-chain-step.succeeded { color: var(--live, var(--ink-2)); }
+.voice-chain-step.failed { color: var(--danger); }
+.voice-prepare-cta,
+.tp-body p.voice-prepare-cta {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--ink-2);
 }
 
 /* ─── Render-dialog animations (only used by app-chrome dialogs) */

@@ -1,4 +1,5 @@
 import { appendJobStatus, jobEvents, latestJob, latestJobs } from '@etvideoscript/core';
+import { cancelPrepareVoice, PREPARE_VOICE_JOB_TYPE } from './voiceRoutes';
 import type { LocalApiRouteContext } from './routeContext';
 
 type JobType = 'extract-audio' | 'peaks' | 'transcribe' | 'validate-manifest' | 'render-draft' | 'export-captions';
@@ -19,6 +20,14 @@ export function registerJobRoutes(ctx: LocalApiRouteContext, cancelledJobs: Set<
     const ws = workspace(req.params.projectId);
     const job = latestJob(ws, req.params.jobId);
     if (!job) return reply.code(404).send({ error: 'job not found' });
+    // ⟨Q2⟩: prepare-voice cancellation is only legal before the paid clone call is issued.
+    // After that the generic "write a cancelled terminal" behaviour would claim the call never
+    // happened, so the route refuses instead and lets the job reach its real terminal.
+    if (job.type === PREPARE_VOICE_JOB_TYPE) {
+      const dispatch = await cancelPrepareVoice(ctx, req.params.projectId, ws, req.params.jobId, cancelledJobs);
+      if (!dispatch.ok) return reply.code(dispatch.code).send(dispatch.body);
+      return { job: latestJob(ws, req.params.jobId) };
+    }
     cancelledJobs.add(req.params.jobId);
     appendJobStatus(ws, { jobId: req.params.jobId, projectId: req.params.projectId, type: job.type, status: 'cancelled', createdAt: job.createdAt, completedAt: new Date().toISOString(), stages: job.stages?.map((stage) => ['queued', 'running', 'waiting_for_approval'].includes(stage.status) ? { ...stage, status: 'cancelled' as const, completedAt: new Date().toISOString() } : stage) });
     return { job: latestJob(ws, req.params.jobId) };

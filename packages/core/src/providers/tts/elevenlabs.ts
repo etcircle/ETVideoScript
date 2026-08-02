@@ -99,7 +99,15 @@ export async function cloneElevenLabsVoice(input: {
   baseUrl?: string;
   signal: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Network transport. Defaults to the module's guardedFetch so every existing caller is
+   * unchanged; the `clone.elevenlabs` provider adapter passes the ENGINE's guardedFetch so
+   * the clone runs inside runProvider's cap/ledger machinery (S1b ⟨Q5⟩/⟨R4⟩). Both are the
+   * same guarded primitive, so the D8 paid-call gate applies either way.
+   */
+  fetchImpl?: typeof guardedFetch;
 }): Promise<{ voiceId: string }> {
+  const doFetch = input.fetchImpl ?? guardedFetch;
   if (!input.secret) throw new ProviderExecutionError('Configure a secretRef/API key for ElevenLabs TTS before cloning a voice.', { code: 'provider_auth_failed' });
   if (input.samples.length === 0) throw new ProviderExecutionError('At least one voice sample is required.', { code: 'provider_auth_failed' });
   if (input.samples.length > 25) throw new ProviderExecutionError('ElevenLabs IVC accepts at most 25 samples per clone request.', { code: 'provider_auth_failed' });
@@ -109,7 +117,7 @@ export async function cloneElevenLabsVoice(input: {
   for (const s of input.samples) {
     form.append('files', new Blob([s.audio as unknown as BlobPart], { type: s.mimeType }), s.fileName);
   }
-  const response = await guardedFetch(`${baseUrl(input.baseUrl)}/v1/voices/add`, {
+  const response = await doFetch(`${baseUrl(input.baseUrl)}/v1/voices/add`, {
     tier: 'paid',
     method: 'POST',
     headers: { 'xi-api-key': input.secret, Accept: 'application/json' },
@@ -128,6 +136,26 @@ export async function cloneElevenLabsVoice(input: {
   return { voiceId: json.voice_id };
 }
 
+/**
+ * ElevenLabs speech-to-speech voice_settings. Sent as the API's JSON-encoded `voice_settings`
+ * form field. Omitted entirely when the caller passes nothing — EL then applies the voice's
+ * own stored settings, which is the historical (and still default) behaviour.
+ */
+export interface ElevenLabsVoiceSettings {
+  stability?: number;
+  similarity_boost?: number;
+  style?: number;
+  use_speaker_boost?: boolean;
+}
+
+// D4: PUBLIC DEFAULTS ARE UNCHANGED. The source part is still declared as the browser
+// MediaRecorder shape ('audio/webm' / 'recording.webm') and no voice_settings are sent, because
+// this function is publicly exported from core and the record-a-take route depends on exactly
+// that. The S1b clone-chain callsite passes the ear-locked recipe values explicitly
+// (audio/wav + stability 0.5 / similarity_boost 0.9 / use_speaker_boost true).
+export const ELEVENLABS_STS_DEFAULT_SOURCE_MIME = 'audio/webm';
+export const ELEVENLABS_STS_DEFAULT_SOURCE_FILENAME = 'recording.webm';
+
 export async function speechToSpeechElevenlabs(input: {
   audio: Buffer;
   voiceId: string;
@@ -136,13 +164,28 @@ export async function speechToSpeechElevenlabs(input: {
   baseUrl?: string;
   signal: AbortSignal;
   timeoutMs?: number;
+  /** MIME type declared for the uploaded source audio part. Default: 'audio/webm'. */
+  sourceMimeType?: string;
+  /** Filename declared for the uploaded source audio part. Default: 'recording.webm'. */
+  sourceFileName?: string;
+  /** EL voice_settings for this conversion. Omitted from the request when absent. */
+  voiceSettings?: ElevenLabsVoiceSettings;
+  /** Sent as `remove_background_noise`. Default: false (never clean the user's audio). */
+  removeBackgroundNoise?: boolean;
+  /** Network transport. Defaults to the module's guardedFetch; the provider adapter passes the engine's. */
+  fetchImpl?: typeof guardedFetch;
 }): Promise<{ audio: Buffer; mimeType: 'audio/wav' }> {
   if (!input.secret) throw new ProviderExecutionError('Configure a secretRef/API key for ElevenLabs TTS before using speech-to-speech.', { code: 'provider_auth_failed' });
   const form = new FormData();
-  form.append('audio', new Blob([input.audio as unknown as BlobPart], { type: 'audio/webm' }), 'recording.webm');
+  form.append(
+    'audio',
+    new Blob([input.audio as unknown as BlobPart], { type: input.sourceMimeType ?? ELEVENLABS_STS_DEFAULT_SOURCE_MIME }),
+    input.sourceFileName ?? ELEVENLABS_STS_DEFAULT_SOURCE_FILENAME
+  );
   if (input.model) form.append('model_id', input.model);
-  form.append('remove_background_noise', 'false');
-  const response = await guardedFetch(`${baseUrl(input.baseUrl)}/v1/speech-to-speech/${encodeURIComponent(input.voiceId)}?output_format=pcm_24000`, {
+  if (input.voiceSettings) form.append('voice_settings', JSON.stringify(input.voiceSettings));
+  form.append('remove_background_noise', input.removeBackgroundNoise ? 'true' : 'false');
+  const response = await (input.fetchImpl ?? guardedFetch)(`${baseUrl(input.baseUrl)}/v1/speech-to-speech/${encodeURIComponent(input.voiceId)}?output_format=pcm_24000`, {
     tier: 'paid',
     method: 'POST',
     headers: { 'xi-api-key': input.secret, Accept: 'audio/basic' },

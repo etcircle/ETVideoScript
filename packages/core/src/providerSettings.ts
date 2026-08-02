@@ -38,9 +38,14 @@ export class SettingsError extends Error {
 // handle infill.cartesia records with proper cost-cap and ledger tracking.
 // (Layer 2 TODO: also reject kind==='infill' in the user-facing settings ROUTES
 // so the public API matches this "hidden kind" contract — see Hermes impl-review.)
-export const ProviderKindSchema = z.enum(['stt', 'tts', 'studio-sound', 'llm', 'image-gen', 'video-gen', 'music-gen', 'infill']);
+// 'clone' is the same species of hidden kind as 'infill' (S1b ⟨Q5⟩): voice cloning is an
+// internal capability of the voice_patch chain, not a user-selectable task. It exists as a
+// provider kind ONLY so the EL clone call runs inside runProvider — spend caps, cap
+// reservation, ledger events, structured provider errors — instead of a bespoke second
+// choke point. It must never appear in settings UI or workspace defaults.
+export const ProviderKindSchema = z.enum(['stt', 'tts', 'studio-sound', 'llm', 'image-gen', 'video-gen', 'music-gen', 'infill', 'clone']);
 export const ProviderTierSchema = z.enum(['local', 'paid']);
-export const ProviderIdSchema = z.string().regex(/^(stt|tts|studio-sound|llm|image-gen|video-gen|music-gen|infill)\.[a-z0-9][a-z0-9-]*$/, 'provider id must be <kind>.<name>');
+export const ProviderIdSchema = z.string().regex(/^(stt|tts|studio-sound|llm|image-gen|video-gen|music-gen|infill|clone)\.[a-z0-9][a-z0-9-]*$/, 'provider id must be <kind>.<name>');
 export const ProviderSourceSchema = z.enum(['manual', 'env-import']).default('manual');
 
 export const CostPerUnitSchema = z.object({
@@ -315,7 +320,14 @@ export function writeWorkspaceSettings(workspacePath: string, value: WorkspaceSe
   return { path, value: parsed, updatedAt: parsed.updatedAt, mtimeMs: written.mtimeMs, hash: written.hash };
 }
 
-export function readProviderRegistry(input: SettingsPathsInput = {}): SettingsSnapshot<ProviderRegistryFile> {
+/**
+ * `persistMigration: false` migrates an older registry IN MEMORY only.
+ *
+ * A read taken purely to answer a question — "what would this call cost?" — must not rewrite the
+ * user's settings as a side effect. The returned value is identical either way; only the
+ * on-disk file is left alone.
+ */
+export function readProviderRegistry(input: SettingsPathsInput & { persistMigration?: boolean } = {}): SettingsSnapshot<ProviderRegistryFile> {
   const path = providerRegistryPath(input);
   const snap = readSnapshotBytes(path);
   if (!snap.bytes) return { path, value: emptyProviderRegistry(), updatedAt: null, mtimeMs: null, hash: null };
@@ -327,6 +339,7 @@ export function readProviderRegistry(input: SettingsPathsInput = {}): SettingsSn
     throw new SettingsError('invalid_settings', `Invalid provider registry at ${path}. Fix the file by hand or restore from backup; ETVideoScript will not reset it silently.`, parsedMigrated.error.flatten());
   }
   if (beforeVersion !== PROVIDER_REGISTRY_SCHEMA_VERSION) {
+    if (input.persistMigration === false) return { path, value: parsedMigrated.data, updatedAt: parsedMigrated.data.updatedAt, mtimeMs: snap.mtimeMs, hash: snap.hash };
     const backup = `${path}.v${beforeVersion}.bak`;
     if (!existsSync(backup)) copyFileSync(path, backup);
     atomicWriteJson(path, parsedMigrated.data);
@@ -574,6 +587,84 @@ export function ensureCartesiaInfillProvider(input: SettingsPathsInput = {}): Pr
   });
 }
 
+/**
+ * Idempotently upsert the `clone.elevenlabs` provider record (S1b ⟨Q5⟩/⟨R4⟩) so
+ * `runProvider({ kind:'clone', providerId:'clone.elevenlabs' })` resolves a real record with a
+ * secretRef instead of engine.ts's synthetic fallback (which has none and would 401).
+ *
+ * The secretRef is inherited from the user's existing ElevenLabs TTS record when present, so a
+ * custom-named key keeps working; otherwise the conventional 'elevenlabs' ref. Like
+ * ensureCartesiaInfillProvider, this record is NOT a default for its kind and is not surfaced
+ * in settings UI. The secretRef doubles as the clone cache's `accountRef` discriminator (⟨F11⟩).
+ */
+export function ensureElevenLabsCloneProvider(input: SettingsPathsInput = {}): ProviderRecord {
+  const registry = readProviderRegistry(input).value;
+  const ttsEl = registry.providers.find((p) => p.id === 'tts.elevenlabs');
+  const existing = registry.providers.find((p) => p.id === 'clone.elevenlabs');
+  const baseUrl = existing?.baseUrl ?? ttsEl?.baseUrl;
+  const secretRef = existing?.secretRef ?? ttsEl?.secretRef ?? 'elevenlabs';
+  if (existing
+    && existing.kind === 'clone' && existing.name === 'elevenlabs'
+    && existing.tier === 'paid' && existing.secretRef === secretRef
+    && (existing.baseUrl ?? undefined) === (baseUrl ?? undefined)) {
+    return existing;
+  }
+  return upsertProvider({
+    ...input,
+    provider: {
+      id: 'clone.elevenlabs',
+      kind: 'clone',
+      name: 'elevenlabs',
+      tier: 'paid',
+      secretRef,
+      ...(baseUrl ? { baseUrl } : {})
+    }
+  });
+}
+
+/**
+ * Idempotently upsert the `tts.elevenlabs-sts` provider record (S1b D7) so the speech-to-speech
+ * half of the clone chain resolves its own secretRef and is accounted under its OWN provider id
+ * — separate spend cap and separate ledger rows from plain TTS. Like the clone record, it
+ * inherits the user's existing ElevenLabs key reference and is never made a default.
+ */
+export function ensureElevenLabsStsProvider(input: SettingsPathsInput = {}): ProviderRecord {
+  const registry = readProviderRegistry(input).value;
+  const ttsEl = registry.providers.find((p) => p.id === 'tts.elevenlabs');
+  const existing = registry.providers.find((p) => p.id === 'tts.elevenlabs-sts');
+  const baseUrl = existing?.baseUrl ?? ttsEl?.baseUrl;
+  const secretRef = existing?.secretRef ?? ttsEl?.secretRef ?? 'elevenlabs';
+  if (existing
+    && existing.kind === 'tts' && existing.name === 'elevenlabs-sts'
+    && existing.tier === 'paid' && existing.secretRef === secretRef
+    && (existing.baseUrl ?? undefined) === (baseUrl ?? undefined)) {
+    return existing;
+  }
+  return upsertProvider({
+    ...input,
+    provider: {
+      id: 'tts.elevenlabs-sts',
+      kind: 'tts',
+      name: 'elevenlabs-sts',
+      tier: 'paid',
+      secretRef,
+      ...(baseUrl ? { baseUrl } : {})
+    }
+  });
+}
+
+/**
+ * Idempotently upsert the `tts.elevenlabs` record. The clone chain's TTS step needs a resolvable
+ * secretRef exactly like the other two; without a record the engine's synthetic fallback has
+ * none and the call 401s. Never made a default — the user's own TTS default is untouched.
+ */
+export function ensureElevenLabsTtsProvider(input: SettingsPathsInput = {}): ProviderRecord {
+  const registry = readProviderRegistry(input).value;
+  const existing = registry.providers.find((p) => p.id === 'tts.elevenlabs');
+  if (existing) return existing;
+  return upsertProvider({ ...input, provider: { id: 'tts.elevenlabs', kind: 'tts', name: 'elevenlabs', tier: 'paid', secretRef: 'elevenlabs' } });
+}
+
 function legacyEnvProvider(kind: ProviderKind, env: Record<string, string | undefined>): ProviderRecord | null {
   if (kind === 'stt') {
     const url = resolveWhisperBaseUrl(env);
@@ -586,7 +677,7 @@ function legacyEnvProvider(kind: ProviderKind, env: Record<string, string | unde
   return null;
 }
 
-export function resolveProviderForKind(input: SettingsPathsInput & { kind: ProviderKind; flagProviderId?: string; env?: Record<string, string | undefined> }): ProviderRecord | null {
+export function resolveProviderForKind(input: SettingsPathsInput & { kind: ProviderKind; flagProviderId?: string; env?: Record<string, string | undefined>; persistMigration?: boolean }): ProviderRecord | null {
   const env = input.env ?? process.env;
   const fromEnv = env.ETVS_PROVIDER_OVERRIDE;
   const registry = readProviderRegistry(input).value;

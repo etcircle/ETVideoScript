@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { assertInside } from './filesystem';
+import { assertInside, stageVerifiedWorkspaceFile } from './filesystem';
 import { extractFullBandReference } from './media';
 import { loadTranscript } from './transcript';
 import { cloneCartesiaVoice, cloneElevenLabsVoice, type VoiceCloneSample } from './providers';
@@ -138,9 +138,22 @@ export interface CloneCleanClipParams {
   // falls back to the baseUrl host (a non-default endpoint implies a distinct tenant), and
   // with neither the record is account-unscoped (matches like a legacy record).
   accountRef?: string;
-  secret: string;
+  /**
+   * Provider credential. REQUIRED unless `cloneExecutor` is supplied — an injected executor
+   * (the S1b prepare-voice job's runProvider bridge) resolves the secret itself from the
+   * provider record's secretRef, and must never be handed the raw value.
+   */
+  secret?: string;
   baseUrl?: string;
   signal: AbortSignal;
+  /**
+   * Injected paid-call executor (S1b ⟨Q5⟩/⟨R4⟩). When present it REPLACES the built-in
+   * provider dispatch for the remote clone, so the call can run inside `runProvider`
+   * (spend caps, cap reservation, ledger events, structured errors) without cloneCleanClip
+   * growing a second, parallel paid path. Everything else — cleaned-source contract, cache
+   * identity, per-window prep, record persistence — is unchanged and still enforced here.
+   */
+  cloneExecutor?: (input: { name: string; samples: VoiceCloneSample[] }) => Promise<{ voiceId: string }>;
   // ── Multi-window mode (S1a) ──
   // When present AND the provider's maxSamples > 1, cloneCleanClip preps EACH window
   // separately (slice → pause retain-cap 1.5s → clone-band loudnorm −20/−3) and uploads them
@@ -805,6 +818,56 @@ function findCachedVoice(
   return null;
 }
 
+/**
+ * The project's cleaned multi-window clone for ONE cleanup generation, ignoring the exact
+ * window set (S1b item 6). `/voice/status` must answer "is a voice ready for this recording as
+ * it stands right now?" without decoding audio to re-derive windows, so it matches on the
+ * identity that actually invalidates a clone: provider + account + project + cleaned source
+ * class + cleanup generation. `cloneCleanClip`'s own cache check stays window-exact — this is a
+ * strictly coarser READ used for state display, never to skip a paid call.
+ */
+export function findProjectCleanedClone(
+  settingsInput: SettingsPathsInput,
+  query: { projectId: string; provider: VoiceProvider; accountRef?: string; cleanupIdentity?: string }
+): VoiceRecord | null {
+  if (!query.projectId) return null;
+  const library = readVoicesLibrary(settingsInput).value;
+  for (const v of library.voices) {
+    if (v.provider !== query.provider) continue;
+    // Same class-symmetric account matching as findCachedVoice: a tagged request never
+    // matches an untagged record and vice versa.
+    if (v.accountRef !== query.accountRef) continue;
+    if (v.originProjectId !== query.projectId) continue;
+    if (v.sourceClass !== 'cleaned') continue;
+    // OMITTING cleanupIdentity asks the generation-agnostic question — "does this project have
+    // ANY cleaned clone?" — which is what distinguishes 'stale' (re-prepare) from 'none'
+    // (prepare). Supplying it asks the generation-exact question the patch route needs.
+    if (query.cleanupIdentity !== undefined && v.cleanupIdentity !== query.cleanupIdentity) continue;
+    return v;
+  }
+  return null;
+}
+
+// ── Remote clone dispatch ──────────────────────────────────────────────────────
+// One place decides HOW the paid clone call is made: the caller's injected executor when
+// present (S1b: runProvider, so the call is capped/ledgered), otherwise the built-in
+// per-provider adapter with the caller's own credential. Both single-window and multi-window
+// prep funnel through here so the two paths can never diverge on this.
+async function runClone(
+  params: CloneCleanClipParams,
+  cloneCfg: { clone: CloneFn },
+  request: { name: string; samples: VoiceCloneSample[] }
+): Promise<{ voiceId: string }> {
+  if (params.cloneExecutor) return params.cloneExecutor(request);
+  return cloneCfg.clone({
+    name: request.name,
+    samples: request.samples,
+    secret: params.secret!,
+    baseUrl: params.baseUrl,
+    signal: params.signal
+  });
+}
+
 // ── Orchestrator ───────────────────────────────────────────────────────────────
 
 export async function cloneCleanClip(
@@ -819,6 +882,10 @@ export async function cloneCleanClip(
   const provider: VoiceProvider = params.provider;
   const cloneCfg = CLONE_PROVIDERS[provider];
   if (!cloneCfg) throw new Error(`cloneCleanClip: unsupported clone provider "${provider}". Pass 'elevenlabs' or 'cartesia' explicitly — core has no default.`);
+  // Fail before any extraction/remote work: without an injected executor the built-in dispatch
+  // needs a credential, and a missing one would otherwise surface as a provider 401 AFTER the
+  // full multi-window prep chain has run.
+  if (!params.cloneExecutor && !params.secret) throw new Error('cloneCleanClip: secret is required unless cloneExecutor is supplied.');
   // Account discriminator for cache scoping. Prefer the caller's explicit non-secret
   // identifier; fall back to the baseUrl host (a non-default endpoint implies a distinct
   // tenant). NEVER derived from the secret value. Undefined ⇒ account-unscoped record
@@ -972,12 +1039,9 @@ export async function cloneCleanClip(
     // single sample for EVERY provider — behavior is identical to the old Cartesia-hardwired
     // path (which also sent one sample). EL accepts the one sample (well under its 25 cap);
     // filling EL's multi-sample budget is future work (the multi-window scorer), not this wave.
-    const cloneResult = await cloneCfg.clone({
+    const cloneResult = await runClone(params, cloneCfg, {
       name: voiceName,
-      samples: [{ audio, fileName: 'clip.wav', mimeType: 'audio/wav' }],
-      secret: params.secret,
-      baseUrl: params.baseUrl,
-      signal: params.signal
+      samples: [{ audio, fileName: 'clip.wav', mimeType: 'audio/wav' }]
     });
 
     // The provider handle must fit VoiceRecordSchema (voiceId max 128) or upsertVoice throws
@@ -1161,9 +1225,15 @@ async function cloneMultiWindow(
   // cleaned bed is length-preserving (EL Isolator returns a same-duration file), so window
   // timestamps map 1:1.
   let baseAudioAbs: string;
+  let stagedCleaned: { path: string; dispose: () => void } | null = null;
   const refRel = await extractFullBandReference(workspace, spanClipId);
   if (sourceClass === 'cleaned') {
-    baseAudioAbs = assertInside(workspace, cleanedAssetRel!);
+    // SYMLINK SAFETY: the contract block above validated the path lexically, but ffmpeg would
+    // re-open it by NAME — a symlink swapped in at the leaf or at any ancestor between the two
+    // would upload arbitrary local audio to a paid provider. Read it once through the
+    // no-follow/fstat path and slice from the staged private copy instead.
+    stagedCleaned = stageVerifiedWorkspaceFile(workspace, cleanedAssetRel!, { fileName: 'cleaned-source.wav' });
+    baseAudioAbs = stagedCleaned.path;
   } else {
     baseAudioAbs = assertInside(workspace, refRel);
     // Hardened guard: never clone from the 16k STT copy (same as single-window path).
@@ -1190,13 +1260,7 @@ async function cloneMultiWindow(
     }
 
     // ONE clone call with N samples (EL's IVC accepts multiple sample files in a single add).
-    const cloneResult = await cloneCfg.clone({
-      name: voiceName,
-      samples,
-      secret: params.secret,
-      baseUrl: params.baseUrl,
-      signal: params.signal
-    });
+    const cloneResult = await runClone(params, cloneCfg, { name: voiceName, samples });
 
     if (cloneResult.voiceId.length > 128) throw new Error(`cloneCleanClip: ${provider} returned a voice id longer than 128 chars; the remote clone was created but cannot be persisted locally.`);
     const voiceId = `voice-${randomBytes(4).toString('hex')}`;
@@ -1223,5 +1287,6 @@ async function cloneMultiWindow(
     return { voice, selection, cached: false, referencePath: refRel, sampleCount: windows.length };
   } finally {
     try { rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    stagedCleaned?.dispose();
   }
 }
