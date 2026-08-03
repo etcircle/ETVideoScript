@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
 import { assertInside, nowIso } from './filesystem';
 import './providers';
-import { getProvider, runProvider, type TtsInput, type TtsOutput, type InfillInput, type InfillOutput } from './providers';
+import { canonicalProviderId, getProvider, runProvider, type TtsInput, type TtsOutput, type InfillInput, type InfillOutput } from './providers';
 import type { TranscriptWords } from './schemas';
 import { extractFullBandReference } from './media';
 import { extractReferenceWindow } from './audioClip';
@@ -102,9 +102,14 @@ export interface SpeechSynthesisResult {
   seamBaked?: boolean;
 }
 
+/**
+ * Shared with the execution + spend-attribution layers (providers/providerId.ts) so a route's
+ * ledger id and the engine's resolved id can never diverge — and so a non-string provider (an
+ * array from a repeated query param, a number from a malformed body) is a typed bad request
+ * here, at the first gate, instead of coercing into a plausible-looking id.
+ */
 function normalizeProviderId(provider?: string): string | undefined {
-  if (!provider) return undefined;
-  return provider.includes('.') ? provider : `tts.${provider}`;
+  return canonicalProviderId('tts', provider);
 }
 
 export function assertSpeechProviderSupported(provider?: string): void {

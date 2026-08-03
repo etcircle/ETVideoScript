@@ -5,7 +5,7 @@ import { assertInside, atomicWriteFile, atomicWriteJson, loadProject, nowIso, sa
 import { loadManifestV3 } from './manifest/io';
 import type { ManifestV3 } from './manifest/schema';
 import './providers';
-import { ProviderEnvelopeError, runProvider, type SttHomelabWhisperOutput, type SttMockOutput } from './providers';
+import { ProviderEnvelopeError, canonicalProviderId, runProvider, type SttHomelabWhisperOutput, type SttMockOutput } from './providers';
 import { resolveWhisperBaseUrl, resolveWhisperBasicAuth, type SettingsPathsInput } from './providerSettings';
 
 function normalize(text: string) { return text.toLowerCase().replace(/[^a-z0-9]+/gi, ''); }
@@ -211,9 +211,11 @@ export function writeTranscript(workspacePath: string, doc: TranscriptWords, opt
 }
 
 function normalizeProvider(provider?: TranscribeProvider): string | undefined {
-  if (!provider) return undefined;
+  // NOT `if (!provider)`: `false`/`0` from an untyped body are malformed, not omitted, and a
+  // truthiness gate quietly resolved them to the configured default STT provider. Absence is
+  // canonicalProviderId's call (isAbsentProviderId), and everything else is a typed error.
   const bare = provider === 'whisper' ? 'homelab-whisper' : provider;
-  return bare.includes('.') ? bare : `stt.${bare}`;
+  return canonicalProviderId('stt', bare);
 }
 
 function whisperAuthorizationHeader(env: Record<string, string | undefined>): string | undefined {

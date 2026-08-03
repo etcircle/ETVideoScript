@@ -17,6 +17,8 @@ import {
   addOperation,
   addTrackV3,
   buildRenderPlanV3,
+  canonicalProviderId,
+  isAbsentProviderId,
   captionsToSrtV3,
   captionsToVttV3,
   createWorkspace,
@@ -525,8 +527,11 @@ export function createApp(config: ApiConfig = loadConfig(), deps: LocalApiDeps =
           // Honor the registry default STT provider when the request doesn't pin one —
           // otherwise jobs queued from the UI silently fall to mock and lose word-level
           // timing, leaving the transcript drifted vs. audio.
+          // ABSENT means unspecified — `false`/`0` do not. A truthiness gate here resolved a
+          // malformed body value to the registry default, which can be a PAID provider; the
+          // typed ProviderIdError from transcribeAllClips is the honest answer instead.
           let resolvedProvider = body.provider;
-          if (!resolvedProvider) {
+          if (isAbsentProviderId(resolvedProvider)) {
             const registry = readProviderRegistry().value;
             const sttDefault = registry.providers.find((p) => p.kind === 'stt' && p.enabled !== false && p.default);
             resolvedProvider = sttDefault?.id ?? 'mock';
@@ -671,14 +676,25 @@ export function createApp(config: ApiConfig = loadConfig(), deps: LocalApiDeps =
       // op persists with the same { providerId, voiceId } shape browser-created ops do. The
       // schema rejects e.g. providerId starting with 'image-gen.', protecting against agent
       // payloads that route a non-TTS provider through this tool.
-      const agentProviderId = params.provider.includes('.') ? params.provider : `tts.${params.provider}`;
+      // Canonical `<kind>.<name>` id, shared with the execution layer (core canonicalProviderId).
+      // It is BOTH the voiceRef providerId and — the fix for the agent path — what every ledger
+      // row for this request is attributed to. The agent transport carries the shorthand ('xai'),
+      // while synthesizeReplacementSpeech's engine row is written under 'tts.xai': attributing
+      // the route's own rows to the shorthand split one requestId's lifecycle across two
+      // provider names, so a cap on the canonical id never saw this spend and, once
+      // providerEstimatedSpend began validating fired rows, the mixed group made the whole
+      // ledger unreadable (op_update_failed is a FIRED status). `params.provider` itself stays
+      // shorthand — synthesis resolves it; only attribution is canonicalized. Mirrors the
+      // browser path's `ledgerProvider` (manifestRoutes).
+      const agentProviderId = canonicalProviderId('tts', params.provider);
+      if (!agentProviderId) throw toolError('unsupported_provider', 'voice_patch requires a provider', 400, version());
       let agentVoiceRef: { providerId: string; voiceId: string } | undefined;
       try { agentVoiceRef = VoiceReferenceSchema.parse({ providerId: agentProviderId, voiceId: params.voice }); }
       catch { throw toolError('unsupported_provider', `voice_patch voiceRef invalid for ${params.provider}/${params.voice}`, 400, version()); }
       const agentModel = typeof params.model === 'string' && params.model.trim() ? params.model.trim() : undefined;
       const { result, changedOperationIds } = runAgentToolV3(coreContext, tool, { ...params, text, status: 'proposed', providerRequestId: requestId, voiceRef: agentVoiceRef, reason: params.reason || `Replacement speech via ${params.provider}/${params.voice}` });
       const operation = (result as any).operation;
-      appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: params.provider, voice: params.voice, language, text, operationId: operation.id, status: 'approved', start, end }));
+      appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: agentProviderId, voice: params.voice, language, text, operationId: operation.id, status: 'approved', start, end }));
       try {
         // Parity with the browser path (manifestRoutes): pass surrounding transcript text so the
         // agent's voice_patch gets the same TTS context. Previously omitted — agent-created patches
@@ -704,7 +720,7 @@ export function createApp(config: ApiConfig = loadConfig(), deps: LocalApiDeps =
           const reason = `TTS returned implausibly short audio (${(generated * 1000).toFixed(0)} ms for a ${(requested * 1000).toFixed(0)} ms slot). The asset was not approved; you can retry.`;
           updateManifestOperation(ws, operation.id, { status: 'rejected', reason });
           const request = latestProviderRequest(ws, requestId);
-          appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: params.provider, voice: params.voice, language, text, operationId: operation.id, status: 'op_update_failed', completedAt: new Date().toISOString(), error: reason, durationGeneratedSec: generated, durationRequestedSec: requested, ...(durationWarning ? { durationWarning } : {}), start, end, ...providerExecutionShape(request) }));
+          appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: agentProviderId, voice: params.voice, language, text, operationId: operation.id, status: 'op_update_failed', completedAt: new Date().toISOString(), error: reason, durationGeneratedSec: generated, durationRequestedSec: requested, ...(durationWarning ? { durationWarning } : {}), start, end, ...providerExecutionShape(request) }));
           throw toolError('paid_provider_failed', reason, 502, version());
         }
         const updated = updateManifestOperation(ws, operation.id, { status: 'approved', asset: speech.asset, providerRequestId: requestId, durationGeneratedSec: generated, durationRequestedSec: requested, ...(durationWarning ? { durationWarning } : {}), ...(speech.seamBaked ? { seamBaked: true } : {}) });
@@ -727,7 +743,7 @@ export function createApp(config: ApiConfig = loadConfig(), deps: LocalApiDeps =
         // we could not attach (e.g. a filesystem error during probe/approve). Leave the same
         // op_update_failed audit row the HTTP route writes on its approve-failure path.
         if (request?.status === 'succeeded') {
-          appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: params.provider, voice: params.voice, language, text, operationId: operation.id, status: 'op_update_failed', completedAt: new Date().toISOString(), error: reason, start, end, ...providerExecutionShape(request) }));
+          appendProviderRequestEvent(ws, baseProviderEvent({ requestId, projectId, provider: agentProviderId, voice: params.voice, language, text, operationId: operation.id, status: 'op_update_failed', completedAt: new Date().toISOString(), error: reason, start, end, ...providerExecutionShape(request) }));
         }
         throw toolError('paid_provider_failed', request?.error || reason, 500, version());
       }

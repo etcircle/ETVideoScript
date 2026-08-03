@@ -274,6 +274,80 @@ describe('generation asset routes', () => {
     } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('REPLAYS a recorded request whose provider was an explicit empty string (body hash unchanged)', async () => {
+    // Validating the provider must not reshape the body that gets HASHED. canonicalJson keeps
+    // `""` and omits `undefined`, so folding an explicit empty-string provider into undefined
+    // would give an already-recorded request a different hash on retry — a 409 body-mismatch
+    // instead of the replay it is entitled to.
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-generation-'));
+    process.env.HOME = root;
+    const app = createApp(config(root));
+    try {
+      await createProject(app);
+      const payload = { kind: 'image-gen', prompt: 'empty provider', provider: '', requestId: 'provider_empty_string' };
+      const first = await app.inject({ method: 'POST', url: '/api/projects/episode-001/assets/generations', payload });
+      expect(first.statusCode).toBe(200);
+      const replay = await app.inject({ method: 'POST', url: '/api/projects/episode-001/assets/generations', payload });
+      expect(replay.statusCode).toBe(200);
+      expect(JSON.parse(first.body).providerRequestId).toBe('provider_empty_string');
+      // The replay hands back the recorded row + the asset already on the manifest.
+      expect(JSON.parse(replay.body).request.requestId).toBe('provider_empty_string');
+      expect(JSON.parse(replay.body).asset.path).toBe(JSON.parse(first.body).asset.asset);
+      // One generation, not two.
+      expect(readProviderRequests(join(root, 'episode-001')).filter((event) => event.requestId === 'provider_empty_string').map((event) => event.status)).toEqual(['approved', 'started', 'succeeded']);
+      // And `""` is genuinely still part of the hashed body: OMITTING the field is a different
+      // body, so the same requestId conflicts rather than silently replaying.
+      const omitted = await app.inject({ method: 'POST', url: '/api/projects/episode-001/assets/generations', payload: { kind: 'image-gen', prompt: 'empty provider', requestId: 'provider_empty_string' } });
+      expect(omitted.statusCode).toBe(409);
+    } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('400s an ARRAY provider on the PAID POST path, before any provider call or ledger row', async () => {
+    // The gap the first pass left: only the free GET /estimate failed closed. parseGenerationBody
+    // did `String(body.provider)`, so `{"provider":["xai"]}` coerced to the real PAID id 'xai'
+    // and ran the generation. A malformed body must never be able to spend money.
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-generation-'));
+    process.env.HOME = root;
+    setupPaid(root);
+    const fetchStub = paidFetchStub();
+    (globalThis as any).fetch = fetchStub.fn;
+    const app = createApp(config(root));
+    try {
+      await createProject(app);
+      for (const badProvider of [['xai'], ['xai', 'mock'], [], 42, false, { id: 'xai' }]) {
+        const response = await app.inject({ method: 'POST', url: '/api/projects/episode-001/assets/generations', payload: { kind: 'image-gen', prompt: 'malformed provider', provider: badProvider, requestId: 'provider_array_image' } });
+        expect(response.statusCode).toBe(400);
+      }
+      // No paid call, and nothing written to the ledger — the refusal is pre-execution.
+      expect(fetchStub.calls).toBe(0);
+      expect(readProviderRequests(join(root, 'episode-001'))).toEqual([]);
+      // The well-formed shorthand still runs.
+      const ok = await app.inject({ method: 'POST', url: '/api/projects/episode-001/assets/generations', payload: { kind: 'image-gen', prompt: 'fine', provider: 'xai', requestId: 'provider_array_image_ok' } });
+      expect(ok.statusCode).toBe(200);
+      expect(fetchStub.calls).toBe(1);
+    } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('rejects a REPEATED provider query param instead of estimating a coerced provider id', async () => {
+    // Fastify parses `?provider=a&provider=b` into an array, and the old
+    // `req.query.provider.includes('.')` expression silently coerced it into `image-gen.a,b` —
+    // a provider nobody configured, quietly estimated as local/free. canonicalProviderId fails
+    // closed, so the malformed query is answered as a bad request.
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-generation-'));
+    process.env.HOME = root;
+    const app = createApp(config(root));
+    try {
+      await createProject(app);
+      const response = await app.inject({ method: 'GET', url: '/api/projects/episode-001/assets/generations/estimate?kind=image-gen&provider=xai&provider=mock' });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toMatch(/array/);
+      // A single, well-formed shorthand still works.
+      const ok = await app.inject({ method: 'GET', url: '/api/projects/episode-001/assets/generations/estimate?kind=image-gen&provider=mock' });
+      expect(ok.statusCode).toBe(200);
+      expect(JSON.parse(ok.body).providerId).toBe('image-gen.mock');
+    } finally { await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('rejects cost estimate requests for non-generation kinds', async () => {
     const root = mkdtempSync(join(tmpdir(), 'etvideo-generation-'));
     process.env.HOME = root;

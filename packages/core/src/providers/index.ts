@@ -1,4 +1,5 @@
 export * from './contract';
+export * from './providerId';
 export * from './registry';
 export * from './engine';
 export * from './localCommand';

@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { Writable } from 'node:stream';
-import { addOperation, analyzeChannelBalance, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, STUDIO_CLEANUP_STALE_WARNING, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
+import { addOperation, analyzeChannelBalance, canonicalProviderId, applyChannelFix, captionsToSrtV3, captionsToVttV3, createWorkspace, doctor, extractAllClipAudio, extractAllClipWaveformPeaks, extractClipAudio, extractClipWaveformPeaks, importLegacyEnvProviders, importSource, loadManifestV3, loadProject, readProviderRegistry, removeProvider, safeProjectPath, settingsErrorEnvelope, setDefaultProvider, setProviderSecret, transcribeAllClips, transcribeClip, upsertProvider, validateManifestV3Document, saveManifestV3, buildRenderPlanV3, renderPlanV3, projectCaptionsV3, loadTranscript, assertInside, STUDIO_CLEANUP_STALE_WARNING, type ProviderKind, type ProviderRecord } from '@etvideoscript/core';
 
 function workspaceOption(value?: string) { return resolve(value || process.cwd()); }
 function print(value: unknown, json?: boolean) { console.log(json ? JSON.stringify(value, null, 2) : value); }
@@ -346,7 +346,11 @@ providersCommand.command('set-default')
   .argument('<id>')
   .option('--yes', 'acknowledge paid provider default cost')
   .action((kind, id, opts) => providerAction(() => {
-    const provider = setDefaultProvider({ homeDir: cliHomeDir(), kind: providerKind(kind), id: id.includes('.') ? id : `${kind}.${id}`, acknowledgePaid: Boolean(opts.yes) });
+    // Shared primitive (core canonicalProviderId): shorthand → `<kind>.<name>`, and a typed
+    // error for anything that is not a provider id — writeProviderError renders it as usual.
+    const canonicalId = canonicalProviderId(kind, id);
+    if (!canonicalId) throw new Error('Provider id is required');
+    const provider = setDefaultProvider({ homeDir: cliHomeDir(), kind: providerKind(kind), id: canonicalId, acknowledgePaid: Boolean(opts.yes) });
     writeProviderSuccess({ kind, defaultProvider: provider.id });
   }));
 
@@ -355,7 +359,8 @@ providersCommand.command('default')
   .argument('<provider>')
   .option('--yes', 'acknowledge paid provider default cost')
   .action((kind, provider, opts) => providerAction(() => {
-    const id = provider.includes('.') ? provider : `${kind}.${provider}`;
+    const id = canonicalProviderId(kind, provider);
+    if (!id) throw new Error('Provider id is required');
     const normalizedKind = providerKind(kind);
     const existing = readProviderRegistry({ homeDir: cliHomeDir() }).value.providers.find((candidate) => candidate.id === id);
     if (!existing) {

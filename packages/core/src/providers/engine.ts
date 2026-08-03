@@ -17,6 +17,7 @@ import {
   type SettingsPathsInput
 } from '../providerSettings';
 import { guardedFetch } from '../network/guardedFetch';
+import { canonicalProviderId } from './providerId';
 import { getProvider } from './registry';
 import type { MediaProvider, ProviderCost, ProviderErrorCode, ProviderErrorEnvelope, ProviderRunEnvelope } from './contract';
 
@@ -64,8 +65,7 @@ export type RunProviderInput<Input> = SettingsPathsInput & {
 };
 
 function normalizeProviderId(kind: ProviderKind, id?: string): string | undefined {
-  if (!id) return undefined;
-  return id.includes('.') ? id : `${kind}.${id}`;
+  return canonicalProviderId(kind, id);
 }
 
 function syntheticProvider(kind: ProviderKind, id: string, adapter: MediaProvider<any, any>): ProviderRecord {

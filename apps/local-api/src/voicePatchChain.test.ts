@@ -980,9 +980,13 @@ describe('clone-chain voice-patch route (S1b W1.7/W1.8)', () => {
       await setupReady(root, home);
       // A truthy non-string provider is a BAD REQUEST, and must stay one: deriving the canonical
       // ledger id from it BEFORE validation called a string method on it and turned the 400 into
-      // a 500. (An array is excluded here — Array.prototype.includes exists, so it survives core's
-      // own normalizeProviderId; that quirk predates this branch and lives on main.)
-      for (const badProvider of [{ id: 'xai' }, 42, true]) {
+      // a 500. Arrays are now in this list too: Array.prototype.includes exists, so ['mock'] used
+      // to survive core's normalizeProviderId and resolve to a REAL adapter (S1b follow-up —
+      // core's canonicalProviderId now fails closed on any non-string).
+      // `false` and `0` are in the list because the route used to write `req.body.provider ||
+      // 'mock'`: a truthiness gate reads a malformed value as "not specified" and silently
+      // resolves it to a default provider, which on other paths is a PAID one.
+      for (const badProvider of [{ id: 'xai' }, 42, true, ['mock'], ['mock', 'xai'], false, 0]) {
         const res = await app.inject({ method: 'POST', url: '/api/projects/p1/manifest/voice-patches', payload: { start: 10, end: 11, text: 'words', provider: badProvider, requestId: 'malformed-provider-1' } });
         expect(res.statusCode).toBe(400);
       }

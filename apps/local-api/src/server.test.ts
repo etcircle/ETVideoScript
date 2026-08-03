@@ -2,14 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { usePaidTransportStubbingGlobalFetch } from './paidTransportTestSetup';
 usePaidTransportStubbingGlobalFetch();
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { createApp } from './server';
 import { loadConfig } from './config';
-import { defaultManifest, loadManifestV3, loadProject, saveManifestV3, saveProject, setProviderSecret, upsertProvider, writeTranscript, wordsFromPlainText } from '@etvideoscript/core';
+import { defaultManifest, loadManifestV3, loadProject, providerEstimatedSpend, saveManifestV3, saveProject, setProviderSecret, upsertProvider, writeTranscript, wordsFromPlainText } from '@etvideoscript/core';
 
 function config(root: string, overrides = {}) {
   return { host: '127.0.0.1', port: 0, workspaceRoot: root, enableTerminal: false, allowedOrigins: ['http://127.0.0.1:4318'], lanOrigins: [], terminalToken: null, ...overrides };
@@ -915,6 +915,83 @@ describe('local API', () => {
       const linesAfter = readFileSync(join(workspace, 'logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
       expect(rowsFor(linesAfter).length).toBe(rowsFor(lines).length);
     } finally { ws?.close(); await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('attributes EVERY agent-path ledger row to the canonical provider id, so the spend group stays readable', async () => {
+    // Pre-existing bug (S1b follow-up): the agent WS tool wrote its own lifecycle rows under the
+    // transport's SHORTHAND ('xai') while the execution engine wrote the cost-bearing rows under
+    // the canonical id ('tts.xai'). Two consequences, both about money:
+    //   • a cap configured on 'tts.xai' never saw the route's rows, and
+    //   • 'op_update_failed' is a FIRED status, so one requestId ended up carrying paid rows
+    //     under two provider names — which providerEstimatedSpend rejects as an unattributable
+    //     ledger, poisoning every later cap check in the workspace.
+    // The degraded-payload path is used because it exercises all four row statuses in one call.
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-agent-'));
+    const app = createApp(config(root, { enableAgent: true, terminalToken: 'test-token' }));
+    stubXai(root, 1, { silent: true });
+    let ws: WebSocket | null = null;
+    try {
+      await createTranscriptProject(app, root, 'replace these words now');
+      ws = await openAgentSocket(app);
+      const recv = wsJsonReceiver(ws);
+      sendWs(ws, { kind: 'hello', id: 'hello-1', protocolVersion: 3, agent: { name: 'vitest' } });
+      await recv();
+      sendWs(ws, { kind: 'tool_call', id: 'voice-canon-1', protocolVersion: 3, tool: 'propose_operation', params: { requestId: 'req-xai-agent-canon-1', type: 'voice_patch', target: { kind: 'clip-span', trackId: 'track_video_001', clipId: 'clip_001', start: 0, end: 1 }, text: 'paid words', provider: 'xai', voice: 'eve' } });
+      const failed = await recv();
+      expect(failed.kind).toBe('tool_error');
+
+      const workspace = join(root, 'episode-001');
+      const rows = readFileSync(join(workspace, 'logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((line) => line.requestId === 'req-xai-agent-canon-1');
+      expect(rows.map((row) => row.status)).toEqual(['approved', 'started', 'succeeded', 'op_update_failed']);
+      // Not one shorthand anywhere in the group.
+      expect([...new Set(rows.map((row) => row.provider))]).toEqual(['tts.xai']);
+      // And the ledger the cap reads is intact: one attributable, priced group.
+      expect(() => providerEstimatedSpend(workspace, ['tts.xai'])).not.toThrow();
+      expect(providerEstimatedSpend(workspace, ['tts.xai'])).toBeGreaterThan(0);
+      // The shorthand attributes nothing — spend belongs to the canonical id alone.
+      expect(providerEstimatedSpend(workspace, ['xai'])).toBe(0);
+    } finally { ws?.close(); await app.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('records the ATTACH-failure audit row canonically too, after money was already spent', async () => {
+    // The second edited ledger site (the catch-all after a SUCCESSFUL paid call — a probe or
+    // manifest write that fails once the audio is bought). Same canonical-attribution rule as
+    // the degraded-payload branch, and it matters more here: the provider row says 'succeeded',
+    // so this row is the record of money spent on audio that could not be attached.
+    const root = mkdtempSync(join(tmpdir(), 'etvideo-agent-'));
+    const app = createApp(config(root, { enableAgent: true, terminalToken: 'test-token' }));
+    const workspace = join(root, 'episode-001');
+    const editsDir = join(workspace, 'edits');
+    const upstream = stubXai(root, 1);
+    // Make the manifest unwritable DURING the paid call, so the failure lands after synthesis
+    // succeeded — exactly the window this branch exists for.
+    vi.stubGlobal('fetch', vi.fn(async (...args: unknown[]) => { chmodSync(editsDir, 0o555); return (upstream as any)(...args); }));
+    let ws: WebSocket | null = null;
+    try {
+      await createTranscriptProject(app, root, 'replace these words now');
+      ws = await openAgentSocket(app);
+      const recv = wsJsonReceiver(ws);
+      sendWs(ws, { kind: 'hello', id: 'hello-1', protocolVersion: 3, agent: { name: 'vitest' } });
+      await recv();
+      sendWs(ws, { kind: 'tool_call', id: 'voice-attach-1', protocolVersion: 3, tool: 'propose_operation', params: { requestId: 'req-xai-agent-attach-1', type: 'voice_patch', target: { kind: 'clip-span', trackId: 'track_video_001', clipId: 'clip_001', start: 0, end: 1 }, text: 'paid words', provider: 'xai', voice: 'eve' } });
+      const failed = await recv();
+      expect(failed.kind).toBe('tool_error');
+      expect(failed.error.code).toBe('paid_provider_failed');
+      // Pin the BRANCH: 500 + not the degraded-floor message ⇒ this is the attach-failure catch,
+      // not the sub-100ms rejection the other test covers.
+      expect(failed.error.status).toBe(500);
+      expect(failed.error.message).not.toContain('implausibly short');
+
+      chmodSync(editsDir, 0o755);
+      const rows = readFileSync(join(workspace, 'logs/provider-requests.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((line) => line.requestId === 'req-xai-agent-attach-1');
+      expect(rows.map((row) => row.status)).toEqual(['approved', 'started', 'succeeded', 'op_update_failed']);
+      expect([...new Set(rows.map((row) => row.provider))]).toEqual(['tts.xai']);
+      expect(() => providerEstimatedSpend(workspace, ['tts.xai'])).not.toThrow();
+      expect(providerEstimatedSpend(workspace, ['tts.xai'])).toBeGreaterThan(0);
+    } finally {
+      try { chmodSync(editsDir, 0o755); } catch { /* already restored */ }
+      ws?.close(); await app.close(); rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects unsupported job types', async () => {

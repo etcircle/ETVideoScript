@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { appendProviderRequestEvent, assertInside, assertSpeechProviderSupported, extractSurroundingTranscriptText, ffprobeDurationSecOrZero, latestProviderRequest, loadProject, loadTranscript, ProviderRequestIdSchema, readProviderRequests, readSecrets, summarizeProviderRequestsForWorkspace, synthesizeReplacementSpeech, VoiceReferenceSchema, snapSpanToBoundaries, VoicePatchReferenceRangeSchema, type PatchTransports, type SnapMode } from '@etvideoscript/core';
+import { appendProviderRequestEvent, assertInside, assertSpeechProviderSupported, canonicalProviderId, isAbsentProviderId, extractSurroundingTranscriptText, ffprobeDurationSecOrZero, latestProviderRequest, loadProject, loadTranscript, ProviderRequestIdSchema, readProviderRequests, readSecrets, summarizeProviderRequestsForWorkspace, synthesizeReplacementSpeech, VoiceReferenceSchema, snapSpanToBoundaries, VoicePatchReferenceRangeSchema, type PatchTransports, type SnapMode } from '@etvideoscript/core';
 import { speechToSpeechElevenlabs } from '@etvideoscript/core/providers/tts/elevenlabs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -689,7 +689,10 @@ export function registerManifestRoutes(ctx: LocalApiRouteContext, cloneChainTran
     const mode = (req.body as any)?.mode ?? 'legacy-tts';
     if (mode !== 'legacy-tts' && mode !== 'clone-chain') return reply.code(400).send({ error: `Unsupported mode: ${String(mode)}`, errorCode: 'invalid-mode' });
     if (mode === 'clone-chain') return handleCloneChain(req, reply);
-    const provider = req.body.provider || 'mock';
+    // `|| 'mock'` would swallow `false`/`0` as "not specified" — they are malformed values, and
+    // must reach assertSpeechProviderSupported so the request is answered as the 400 it is.
+    // Only a genuinely absent provider defaults.
+    const provider = isAbsentProviderId(req.body.provider) ? 'mock' : req.body.provider;
     try { assertSpeechProviderSupported(provider); } catch (err) { return reply.code(400).send({ error: err instanceof Error ? err.message : `Unsupported speech provider: ${String(req.body.provider)}` }); }
     // LEDGER attribution must be the CANONICAL provider id, the same one the execution layer
     // writes (tts.ts normalizeProviderId → e.g. 'xai' becomes 'tts.xai'). The request body carries
@@ -698,10 +701,11 @@ export function registerManifestRoutes(ctx: LocalApiRouteContext, cloneChainTran
     // a cap on 'tts.xai' never saw the group. `provider` itself stays shorthand — synthesis
     // resolves it — only what we attribute spend to is canonicalized.
     //
-    // Computed AFTER validation, and typeof-guarded: calling a string method on a malformed body
-    // value would turn a 400 (unsupported provider) into a 500 (crash), which is a worse answer
-    // to the same bad request.
-    const ledgerProvider = typeof provider === 'string' && provider.includes('.') ? provider : `tts.${String(provider)}`;
+    // Computed AFTER validation, via the same core primitive the execution layer uses
+    // (canonicalProviderId): a malformed body value — including an array, which the old
+    // `.includes('.')` expression silently coerced — is rejected by assertSpeechProviderSupported
+    // above as a 400 rather than crashing here into a 500.
+    const ledgerProvider = canonicalProviderId('tts', provider)!;
     if (!Number.isFinite(req.body.start) || !Number.isFinite(req.body.end) || req.body.start >= req.body.end) return reply.code(400).send({ error: 'Voice patch start/end must be finite and start < end' });
     if (typeof req.body.text !== 'string' || !req.body.text.trim()) return reply.code(400).send({ error: 'Replacement text is required' });
     const text = req.body.text.trim();
@@ -711,7 +715,7 @@ export function registerManifestRoutes(ctx: LocalApiRouteContext, cloneChainTran
     if (!/^[a-zA-Z-]{2,16}$/.test(language)) return reply.code(400).send({ error: 'Invalid language code' });
     const parsedVoiceRef = req.body.voiceRef == null ? null : VoiceReferenceSchema.safeParse(req.body.voiceRef);
     if (parsedVoiceRef && !parsedVoiceRef.success) return reply.code(400).send({ error: `Invalid voiceRef: ${parsedVoiceRef.error.issues.map((issue) => issue.message).join('; ')}` });
-    const voiceRef = parsedVoiceRef?.success ? parsedVoiceRef.data : { providerId: provider.includes('.') ? provider : `tts.${provider}`, voiceId: voice };
+    const voiceRef = parsedVoiceRef?.success ? parsedVoiceRef.data : { providerId: ledgerProvider, voiceId: voice };
     const requestId = req.body.requestId || crypto.randomUUID();
     if (!ProviderRequestIdSchema.safeParse(requestId).success) return reply.code(400).send({ error: 'Invalid requestId' });
     // W6: intake validation for the three intent fields.

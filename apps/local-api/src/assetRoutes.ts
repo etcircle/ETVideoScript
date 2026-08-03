@@ -1,4 +1,4 @@
-import { addAssetV3, addClipV3, addTrackV3, appendJobStatus, appendProviderRequestEvent, assertInside, extractClipAudio, ffprobe, generateMedia, getProvider, latestProviderRequest, loadProject, loadTranscript, mergeTranscripts, probeRecordingMedia, ProviderRequestIdSchema, readProviderRequests, resolveProviderForKind, saveProject, sha256File, transcribeClip, type GenerateMediaKind, type GenerateMediaResult, type ProviderCost, type ProviderRecord, type RecordingProbe } from '@etvideoscript/core';
+import { addAssetV3, addClipV3, addTrackV3, appendJobStatus, appendProviderRequestEvent, assertInside, canonicalProviderId, extractClipAudio, ffprobe, generateMedia, getProvider, latestProviderRequest, loadProject, loadTranscript, mergeTranscripts, probeRecordingMedia, ProviderRequestIdSchema, readProviderRequests, resolveProviderForKind, saveProject, sha256File, transcribeClip, type GenerateMediaKind, type GenerateMediaResult, type ProviderCost, type ProviderRecord, type RecordingProbe } from '@etvideoscript/core';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
@@ -66,10 +66,26 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
     if (!generationKinds.has(kind)) return { error: 'kind must be image-gen, video-gen, or music-gen' };
     const prompt = String(body?.prompt ?? '').trim();
     if (!prompt) return { error: 'prompt is required' };
+    // The provider is VALIDATED here, not coerced. `String(body.provider)` turned
+    // `{"provider":["xai"]}` into the real, PAID id 'xai' and ran the generation — the free GET
+    // /estimate failed closed while the POST that spends money did not. canonicalProviderId
+    // owns both the absent rule and the non-string rejection; the raw shorthand is what we keep,
+    // because generationBodyHash feeds idempotency and canonicalising it here would change the
+    // hash of every previously-recorded request.
+    //
+    // VALIDATE, then assign the ORIGINAL nullish/raw value — do not fold `''` into `undefined`.
+    // The stored body is hashed for idempotency, and canonicalJson omits `undefined` while
+    // keeping `""`, so collapsing an explicit empty-string provider would change the hash of
+    // every already-recorded request that carried one: its retry would 409 on a body-mismatch
+    // instead of replaying the result it is entitled to. Validation is what changed here; the
+    // hashed shape is byte-for-byte what it was.
+    try { canonicalProviderId(kind, body?.provider); }
+    catch (err) { return { error: err instanceof Error ? err.message : 'invalid provider' }; }
+    const provider: string | undefined = body?.provider == null ? undefined : (body.provider as string);
     return {
       kind,
       prompt,
-      provider: body?.provider == null ? undefined : String(body.provider),
+      provider,
       requestId: body?.requestId == null ? undefined : String(body.requestId),
       count: body?.count == null ? undefined : Number(body.count),
       aspectRatio: body?.aspectRatio == null ? undefined : String(body.aspectRatio),
@@ -334,7 +350,7 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
     if (!requestIdResult.success) return reply.code(400).send({ error: 'invalid requestId' });
     const generationInput = { kind: parsed.kind, prompt: parsed.prompt, provider: parsed.provider, count: parsed.count, aspectRatio: parsed.aspectRatio, resolution: parsed.resolution, durationSec: parsed.durationSec, durationMs: parsed.durationMs, model: parsed.model };
     const bodyHash = generationBodyHash(generationInput);
-    const providerId = parsed.provider?.includes('.') ? parsed.provider : (parsed.provider ? `${parsed.kind}.${parsed.provider}` : undefined);
+    const providerId = canonicalProviderId(parsed.kind, parsed.provider);
     const resolvedProvider = resolveProviderForKind({ kind: parsed.kind, flagProviderId: providerId, workspacePath: ws, env: process.env });
     const provider = resolvedProvider?.id ?? providerId ?? `${parsed.kind}.mock`;
     // P4-1c: dedup concurrent same-requestId POSTs onto one provider call, and release the
@@ -403,7 +419,12 @@ export function registerAssetRoutes(ctx: LocalApiRouteContext) {
     try { loadProject(ws); } catch { return reply.code(404).send({ error: 'project not found' }); }
     const kind = String(req.query.kind ?? '') as GenerateMediaKind;
     if (!generationKinds.has(kind)) return reply.code(400).send({ error: 'kind must be image-gen, video-gen, or music-gen' });
-    const providerHint = req.query.provider ? (req.query.provider.includes('.') ? req.query.provider : `${kind}.${req.query.provider}`) : undefined;
+    // Fastify hands back an ARRAY for a repeated `?provider=` query param, and the old
+    // `.includes('.')` expression coerced it into a plausible-looking id (`image-gen.a,b`).
+    // canonicalProviderId fails closed on it, so a malformed query is answered as a 400.
+    let providerHint: string | undefined;
+    try { providerHint = canonicalProviderId(kind, req.query.provider); }
+    catch (err) { return reply.code(400).send({ error: err instanceof Error ? err.message : 'invalid provider' }); }
     const resolved = resolveProviderForKind({ kind, flagProviderId: providerHint, workspacePath: ws, env: process.env });
     const providerId = resolved?.id ?? providerHint ?? `${kind}.mock`;
     const adapter = getProvider(providerId);

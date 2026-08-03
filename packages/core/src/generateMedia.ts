@@ -3,7 +3,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { assertInside, nowIso } from './filesystem';
 import { probeRecordingMedia } from './media';
 import './providers';
-import { runProvider, type GeneratedMediaOutput, type ImageGenInput, type MusicGenInput, type VideoGenInput } from './providers';
+import { canonicalProviderId, runProvider, type GeneratedMediaOutput, type ImageGenInput, type MusicGenInput, type VideoGenInput } from './providers';
 
 export type GenerateMediaKind = 'image-gen' | 'video-gen' | 'music-gen';
 
@@ -38,8 +38,7 @@ export interface GenerateMediaResult {
 }
 
 function normalizeProviderId(kind: GenerateMediaKind, provider?: string): string | undefined {
-  if (!provider) return undefined;
-  return provider.includes('.') ? provider : `${kind}.${provider}`;
+  return canonicalProviderId(kind, provider);
 }
 
 function assertKind(kind: string): asserts kind is GenerateMediaKind {
