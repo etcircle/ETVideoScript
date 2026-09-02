@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Fishing Claude</title>
+    <meta name="description" content="Hour-by-hour perch, pike and zander feeding forecast for Midlands canals." />
+    <meta name="theme-color" content="#0f2a3a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Fishing Claude" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">Fishing Claude<small>Midlands canal predator forecast</small></div>
+      <button id="locBtn" class="chip" type="button" aria-haspopup="dialog">📍 Set location</button>
+    </header>
+
+    <nav class="species" role="tablist" aria-label="Species">
+      <button role="tab" data-species="perch" aria-selected="true" type="button">Perch</button>
+      <button role="tab" data-species="pike" aria-selected="false" type="button">Pike</button>
+      <button role="tab" data-species="zander" aria-selected="false" type="button">Zander</button>
+    </nav>
+
+    <nav class="views" role="tablist" aria-label="View">
+      <button role="tab" data-view="forecast" aria-selected="true" type="button">Forecast</button>
+      <button role="tab" data-view="history" aria-selected="false" type="button">History</button>
+    </nav>
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+
+    <main>
+      <div id="forecastView">
+        <section id="hero" class="card hero" aria-label="Right now"><div class="skeleton">Loading forecast…</div></section>
+        <section aria-label="Next days" class="strip-wrap">
+          <div id="days" class="days"></div>
+        </section>
+      </div>
+
+      <div id="historyView" hidden>
+        <section class="card" aria-label="Past scores">
+          <h2>Last 14 days</h2>
+          <p class="note">
+            What the model would have told you, scored from recorded weather. Use it to check the score against what you
+            actually caught — if your good sessions cluster at 3.4+, the weights are working; if not, tune them.
+          </p>
+          <div id="historyChart"></div>
+          <div id="historyStats" class="facts-grid"></div>
+        </section>
+        <section aria-label="Past days" class="strip-wrap">
+          <div id="historyDays" class="days"></div>
+        </section>
+      </div>
+
+      <section id="detail" class="card" aria-label="Day detail" hidden></section>
+
+      <section class="card about">
+        <details id="about">
+          <summary>How the score is built</summary>
+          <div id="aboutBody"></div>
+        </details>
+      </section>
+    </main>
+
+    <footer>
+      Weather: <a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a> (CC BY 4.0) · Rainfall © Environment Agency
+      (OGL v3) · Bank holidays: GOV.UK · Sun/moon computed on device.<br />
+      <span id="updated"></span>
+    </footer>
+
+    <dialog id="locDialog" aria-labelledby="locTitle">
+      <h3 id="locTitle">Location</h3>
+      <div class="row">
+        <button id="geoBtn" class="btn primary" type="button">Use my position</button>
+        <span id="geoMsg" class="hint"></span>
+      </div>
+      <div class="spots" id="spots"></div>
+      <div class="row">
+        <label>Name<input id="locName" type="text" placeholder="e.g. Grand Union, Solihull" /></label>
+      </div>
+      <div class="row">
+        <label>Latitude<input id="locLat" type="number" step="0.0001" min="49" max="61" /></label>
+        <label>Longitude<input id="locLng" type="number" step="0.0001" min="-9" max="3" /></label>
+      </div>
+      <div class="toggle">
+        <label for="solunarToggle">Show solunar periods (traditional; no evidence of predictive value, low weight)</label>
+        <input id="solunarToggle" type="checkbox" />
+      </div>
+      <div class="row actions">
+        <button id="locCancel" class="btn" type="button">Cancel</button>
+        <button id="locSave" class="btn primary" type="button">Save</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

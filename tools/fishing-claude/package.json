@@ -1,0 +1,15 @@
+{
+  "name": "fishing-claude",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Hour-by-hour perch / pike / zander feeding forecast for Midlands canals. Static PWA, no build step, no API keys.",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.mjs'",
+    "icons": "node scripts/make-icons.mjs",
+    "serve": "python3 -m http.server 4390 --directory public"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
