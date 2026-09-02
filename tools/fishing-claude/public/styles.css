@@ -66,6 +66,39 @@
   }
 }
 
+/* Explicit theme stamp (e.g. an embedding viewer's dark toggle) wins over the OS setting. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #242423;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --brand: #0f2a3a;
+  --accent: #3987e5;
+  --twilight: rgba(255, 255, 255, 0.05);
+  --night: rgba(255, 255, 255, 0.1);
+  /* Dark surface: same hue, stepped so higher score = lighter = louder. */
+  --score-1: #1c5cab;
+  --score-2: #256abf;
+  --score-3: #3987e5;
+  --score-4: #6da7ec;
+  --score-5: #9ec5f4;
+  --score-1-ink: #ffffff;
+  --score-2-ink: #ffffff;
+  --score-3-ink: #ffffff;
+  --score-4-ink: #0b0b0b;
+  --score-5-ink: #0b0b0b;
+  --pos: #3fbf3f;
+  --neg: #ff7b72;
+  --warn-bg: #3a2a10;
+  --warn-ink: #ffd699;
+}
+
 * {
   box-sizing: border-box;
 }

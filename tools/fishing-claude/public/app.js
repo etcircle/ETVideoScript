@@ -6,6 +6,9 @@ import { localParts, midnightForDateKey } from './src/timezone.js';
 
 const TZ = 'Europe/London';
 const STORE_KEY = 'fishing-claude:v1';
+// Single-file preview builds (see scripts/build-single.mjs) set this: they run
+// on synthetic weather because the embedding sandbox blocks outbound fetch.
+const PREVIEW = typeof window !== 'undefined' && window.__FISHING_CLAUDE_PREVIEW__ === true;
 
 // Midlands canal presets. Coordinates are approximate; weather grids are 2–10 km so it hardly matters.
 const PRESETS = [
@@ -120,11 +123,11 @@ function mockWeather() {
 
 async function loadData() {
   const params = new URLSearchParams(location.search);
-  if (params.get('mock') === '1') {
+  if (PREVIEW || params.get('mock') === '1') {
     state.wx = mockWeather();
     state.bank = new Set();
     state.gauge = null;
-    setStatus('Mock data (QA mode)');
+    setStatus(PREVIEW ? 'Preview build — synthetic weather, not a real forecast' : 'Mock data (QA mode)', true);
     return;
   }
   setStatus('Fetching forecast…');
@@ -746,7 +749,7 @@ async function main() {
   load();
   wireUi();
   renderAbout();
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !new URLSearchParams(location.search).has('nosw')) {
+  if ('serviceWorker' in navigator && !PREVIEW && location.protocol.startsWith('http') && !new URLSearchParams(location.search).has('nosw')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   if (!state.loc) {
